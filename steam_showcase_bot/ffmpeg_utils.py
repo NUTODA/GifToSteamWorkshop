@@ -132,7 +132,48 @@ def make_gif_from_video(input_path: Path, output_gif: Path, fps: int = 15, scale
         str(output_gif)
     ]
     logger.debug('Running ffmpeg for GIF: %s', ' '.join(cmd))
-    subprocess.check_call(cmd)
+    try:
+        subprocess.check_call(cmd)
+    except subprocess.CalledProcessError as e:
+        logger.error('ffmpeg GIF creation failed: %s', e)
+        raise
+
+    # После создания GIF проверяем последний байт и при необходимости заменяем 0x3B на 0x21
+    try:
+        _fix_gif_terminator(output_gif)
+    except Exception:
+        logger.exception('Failed to adjust GIF terminator for %s', output_gif)
+
+
+def _fix_gif_terminator(gif_path: Path) -> bool:
+    """If last byte of GIF is 0x3B, replace it with 0x21. Returns True if changed."""
+    p = Path(gif_path)
+    try:
+        with p.open('r+b') as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            if size == 0:
+                logger.debug('GIF file %s is empty, skipping terminator fix', p)
+                return False
+            # read last byte
+            f.seek(-1, os.SEEK_END)
+            last = f.read(1)
+            if last == b'\x3B':
+                f.seek(-1, os.SEEK_END)
+                f.write(b'\x21')
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+                logger.info('Replaced GIF terminator for %s: 0x3B -> 0x21', p)
+                return True
+            else:
+                logger.debug('GIF terminator is %s for %s; no change', last.hex() if last else None, p)
+                return False
+    except Exception as e:
+        logger.exception('Error adjusting GIF terminator for %s: %s', gif_path, e)
+        raise
 
 
 def slice_video_inplace_with_gifs(path: str | Path):
