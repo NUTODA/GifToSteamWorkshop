@@ -5,6 +5,7 @@ import logging
 import shutil
 
 from aiogram import Bot, Dispatcher, types
+from aiogram.types import FSInputFile
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from .config import TELEGRAM_BOT_TOKEN as TOKEN, LOG_LEVEL, LOG_FILE, LOG_TO_FILE, SAVE_UPLOADS
@@ -249,7 +250,7 @@ async def handle_file(message: types.Message):
                     if slice_video_inplace_with_gifs:
                         # Run slicing in executor and handle errors locally
                         try:
-                            await loop.run_in_executor(None, slice_video_inplace_with_gifs, slised_copy)
+                            archive_path = await loop.run_in_executor(None, slice_video_inplace_with_gifs, slised_copy)
                         except Exception as e:
                             logger.exception('Ошибка при нарезке файла %s', slised_copy)
                             # Attempt to clean up any artifacts: slised_copy, partial gifs, prepared, original uploaded
@@ -326,10 +327,33 @@ async def handle_file(message: types.Message):
                         except Exception:
                             logger.exception('Error while cleaning .mp4 files in %s', slised_dir)
 
+                        # Если нарезка и архивирование прошли успешно — попытаемся отправить ZIP пользователю
                         try:
-                            await message.answer(f'Нарезано на части и GIFы созданы: {slised_copy.name}_gifs')
+                            if archive_path:
+                                archive = Path(archive_path)
+                                if archive.exists():
+                                    try:
+                                        await message.answer('Нарезка завершена — отправляю ZIP с GIFами.')
+                                    except Exception:
+                                        pass
+                                    try:
+                                        fsfile = FSInputFile(str(archive))
+                                        await message.answer_document(document=fsfile, caption=f'Архив GIF-ов: {archive.name}\nСодержит 5 частей для витрины Steam.')
+                                        logger.info('Sent ZIP %s to user %s', archive, getattr(message.from_user, 'id', None))
+                                    except Exception:
+                                        logger.exception('Failed to send ZIP archive %s to user', archive)
+                                        try:
+                                            await message.answer('Не удалось отправить архив по сети. Архив создан локально.')
+                                        except Exception:
+                                            pass
+                                else:
+                                    logger.warning('Archive path returned but file missing: %s', archive_path)
                         except Exception:
-                            pass
+                            logger.exception('Unexpected error while attempting to send archive')
+                            try:
+                                await message.answer('Произошла ошибка при попытке отправить архив — проверьте логи.')
+                            except Exception:
+                                pass
                     else:
                         logger.debug('slice_video_inplace_with_gifs not available; skipping slicing')
                 except Exception as e:

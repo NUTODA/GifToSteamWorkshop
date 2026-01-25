@@ -224,3 +224,20 @@ def slice_video_inplace_with_gifs(path: str | Path):
         make_gif_from_video(part, gif_path, fps=15, scale_w=-1)
 
     logger.info('Slicing complete. GIFs are in %s', gif_dir)
+
+    # Archive the GIFs into a ZIP file placed next to the sliced files (in sliced_gifs/),
+    # then remove the intermediate GIF files to save space.
+    try:
+        zip_base = str(p.with_name(f"{p.stem}_gifs"))  # without .zip suffix
+        archive_path = shutil.make_archive(zip_base, 'zip', root_dir=str(gif_dir))
+        logger.info('Created ZIP archive of GIFs at %s', archive_path)
+        try:
+            shutil.rmtree(gif_dir)
+            logger.info('Removed intermediate GIF directory %s after archiving', gif_dir)
+        except Exception:
+            logger.exception('Failed to remove GIF directory %s after archiving', gif_dir)
+        # Return the path to archive for potential callers
+        return Path(archive_path)
+    except Exception:
+        logger.exception('Failed to create ZIP archive for GIFs in %s; leaving GIF files in place', gif_dir)
+        return None
