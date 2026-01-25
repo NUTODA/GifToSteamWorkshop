@@ -190,18 +190,42 @@ async def handle_file(message: types.Message):
             try:
                 if not is_ffmpeg_available():
                     logger.warning('ffmpeg executable not found; skipping prepare task')
+                    # удаляем скачанный файл — обработка невозможна
                     try:
-                        await message.answer('FFmpeg не найден; обработка пропущена. Установите ffmpeg и добавьте его в PATH или задайте переменную окружения FFMPEG_BIN.')
+                        if src_path.exists():
+                            src_path.unlink()
+                            logger.info('Removed upload %s because ffmpeg is unavailable', src_path)
+                    except Exception:
+                        logger.exception('Failed to remove upload %s when ffmpeg missing', src_path)
+                    try:
+                        await message.answer('FFmpeg не найден; обработка пропущена и файл удалён. Установите ffmpeg и добавьте его в PATH или задайте переменную окружения FFMPEG_BIN.')
                     except Exception:
                         pass
                     return
             except Exception:
-                # defensive: if is_ffmpeg_available raises for some reason, skip
+                # defensive: if is_ffmpeg_available raises for some reason, skip and remove upload
                 logger.exception('Error checking ffmpeg availability')
+                try:
+                    if src_path.exists():
+                        src_path.unlink()
+                        logger.info('Removed upload %s due to ffmpeg check error', src_path)
+                except Exception:
+                    logger.exception('Failed to remove upload %s after ffmpeg check error', src_path)
                 return
 
             if src_path.suffix.lower() != '.mp4':
                 logger.debug('Source not mp4, skipping prepare task: %s', src_path)
+                # удаляем скачанный неподходящий файл
+                try:
+                    if src_path.exists():
+                        src_path.unlink()
+                        logger.info('Removed non-mp4 upload %s', src_path)
+                except Exception:
+                    logger.exception('Failed to remove non-mp4 upload %s', src_path)
+                try:
+                    await message.answer('Файл неподдерживаемого формата был удалён. Отправьте GIF или видео в поддерживаемом формате.')
+                except Exception:
+                    pass
                 return
             prepared_dir = Path(__file__).parent / 'prepared_gifs'
             loop = asyncio.get_running_loop()
@@ -223,7 +247,85 @@ async def handle_file(message: types.Message):
                     logger.info('Copied prepared file to %s for slicing', slised_copy)
 
                     if slice_video_inplace_with_gifs:
-                        await loop.run_in_executor(None, slice_video_inplace_with_gifs, slised_copy)
+                        # Run slicing in executor and handle errors locally
+                        try:
+                            await loop.run_in_executor(None, slice_video_inplace_with_gifs, slised_copy)
+                        except Exception as e:
+                            logger.exception('Ошибка при нарезке файла %s', slised_copy)
+                            # Attempt to clean up any artifacts: slised_copy, partial gifs, prepared, original uploaded
+                            try:
+                                if slised_copy.exists():
+                                    slised_copy.unlink()
+                                    logger.info('Removed slised copy %s after failed slicing', slised_copy)
+                            except Exception:
+                                logger.exception('Failed to remove slised_copy %s', slised_copy)
+                            try:
+                                for f in slised_dir.glob(f"{slised_copy.stem}*"):
+                                    try:
+                                        if f.is_dir():
+                                            shutil.rmtree(f)
+                                        else:
+                                            f.unlink()
+                                        logger.info('Removed artifact %s', f)
+                                    except Exception:
+                                        logger.exception('Failed to remove artifact %s', f)
+                            except Exception:
+                                logger.exception('Error while cleaning artifacts in %s', slised_dir)
+                            try:
+                                if prepared.exists():
+                                    prepared.unlink()
+                                    logger.info('Removed prepared file %s after failed slicing', prepared)
+                            except Exception:
+                                logger.exception('Failed to remove prepared file %s', prepared)
+                            try:
+                                if src_path.exists():
+                                    src_path.unlink()
+                                    logger.info('Removed original upload %s after failed slicing', src_path)
+                            except Exception:
+                                logger.exception('Failed to remove original upload %s', src_path)
+                            try:
+                                await message.answer(f'Ошибка при создании GIFов: {e}')
+                            except Exception:
+                                pass
+                            return
+
+                        # Если нарезка прошла успешно — удаляем промежуточные файлы
+                        try:
+                            if src_path.exists():
+                                src_path.unlink()
+                                logger.info('Removed original upload %s', src_path)
+                        except Exception:
+                            logger.exception('Failed to remove original upload %s', src_path)
+                            try:
+                                await message.answer('Не удалось удалить исходный файл в gifs/ — проверьте права/логи.')
+                            except Exception:
+                                pass
+
+                        try:
+                            if prepared.exists():
+                                prepared.unlink()
+                                logger.info('Removed prepared file %s', prepared)
+                        except Exception:
+                            logger.exception('Failed to remove prepared file %s', prepared)
+                            try:
+                                await message.answer('Не удалось удалить временный файл в prepared_gifs/ — проверьте права/логи.')
+                            except Exception:
+                                pass
+
+                        # Удаляем все промежуточные .mp4 файлы в папке sliced_gifs, относящиеся к этому файлу
+                        try:
+                            removed = []
+                            for mp4 in slised_dir.glob(f"{slised_copy.stem}*.mp4"):
+                                try:
+                                    mp4.unlink()
+                                    removed.append(mp4.name)
+                                except Exception:
+                                    logger.exception('Failed to remove intermediate mp4 %s', mp4)
+                            if removed:
+                                logger.info('Removed intermediate mp4 files in %s: %s', slised_dir, ','.join(removed))
+                        except Exception:
+                            logger.exception('Error while cleaning .mp4 files in %s', slised_dir)
+
                         try:
                             await message.answer(f'Нарезано на части и GIFы созданы: {slised_copy.name}_gifs')
                         except Exception:
@@ -239,6 +341,20 @@ async def handle_file(message: types.Message):
 
             except Exception as e:
                 logger.exception('Ошибка подготовки файла %s', src_path)
+                # Cleanup candidate prepared file and original upload
+                try:
+                    prep_candidate = prepared_dir / src_path.name
+                    if prep_candidate.exists():
+                        prep_candidate.unlink()
+                        logger.info('Removed prepared candidate %s after preparation error', prep_candidate)
+                except Exception:
+                    logger.exception('Failed to remove prepared candidate %s', prep_candidate)
+                try:
+                    if src_path.exists():
+                        src_path.unlink()
+                        logger.info('Removed original upload %s after preparation error', src_path)
+                except Exception:
+                    logger.exception('Failed to remove original upload %s', src_path)
                 try:
                     await message.answer(f'Ошибка подготовки файла: {e}')
                 except Exception:
