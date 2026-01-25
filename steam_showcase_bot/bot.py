@@ -29,6 +29,15 @@ except Exception:
     VideoFileClip = None  # type: ignore
     MOVIEPY_AVAILABLE = False
 
+# ffmpeg helper (resizer)
+try:
+    from .ffmpeg_utils import prepare_and_resize_copy, is_ffmpeg_available
+    FFMPEG_UTILS_AVAILABLE = True
+except Exception:
+    prepare_and_resize_copy = None
+    is_ffmpeg_available = lambda: False  # type: ignore
+    FFMPEG_UTILS_AVAILABLE = False
+
 
 if not TOKEN:
     logger.warning('Please set TELEGRAM_BOT_TOKEN in .env or environment')
@@ -169,12 +178,52 @@ async def handle_file(message: types.Message):
     try:
         # Priority: animation > video > document
         # Telegram sends GIFs as animation with video/mp4 mime type
+
+        async def _maybe_start_prepare_task(src_path: Path, visible_name: str):
+            """Run prepare_and_resize_copy in executor and notify user on finish/error."""
+            if not FFMPEG_UTILS_AVAILABLE:
+                logger.debug('FFmpeg utils not available; skipping prepare task')
+                return
+            # check that ffmpeg executable is available
+            try:
+                if not is_ffmpeg_available():
+                    logger.warning('ffmpeg executable not found; skipping prepare task')
+                    try:
+                        await message.answer('FFmpeg не найден; обработка пропущена. Установите ffmpeg и добавьте его в PATH или задайте переменную окружения FFMPEG_BIN.')
+                    except Exception:
+                        pass
+                    return
+            except Exception:
+                # defensive: if is_ffmpeg_available raises for some reason, skip
+                logger.exception('Error checking ffmpeg availability')
+                return
+
+            if src_path.suffix.lower() != '.mp4':
+                logger.debug('Source not mp4, skipping prepare task: %s', src_path)
+                return
+            prepared_dir = Path(__file__).parent / 'prepared_gifs'
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(None, prepare_and_resize_copy, src_path, prepared_dir)
+                try:
+                    await message.answer(f'Подготовлено: {visible_name}')
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.exception('Ошибка подготовки файла %s', src_path)
+                try:
+                    await message.answer(f'Ошибка подготовки файла: {e}')
+                except Exception:
+                    pass
+
         if anim:
             fname = anim.file_name or 'animation.mp4'
             # Always save with original extension (usually .mp4 for Telegram GIFs)
             dest = gifs_dir / f'{user_id}_{ts}_{fname}'
             await download_file(anim, dest)
             await message.answer(f'GIF сохранён: {dest.name}')
+            # start background prepare task (non-blocking)
+            asyncio.create_task(_maybe_start_prepare_task(dest, dest.name))
             return
             
         if vid:
@@ -182,6 +231,7 @@ async def handle_file(message: types.Message):
             dest = gifs_dir / f'{user_id}_{ts}_{fname}'
             await download_file(vid, dest)
             await message.answer(f'Видео сохранено: {dest.name}')
+            asyncio.create_task(_maybe_start_prepare_task(dest, dest.name))
             return
             
         if doc:
@@ -193,6 +243,7 @@ async def handle_file(message: types.Message):
                 dest = gifs_dir / f'{user_id}_{ts}_{fname}'
                 await download_file(doc, dest)
                 await message.answer(f'Файл сохранён: {dest.name}')
+                asyncio.create_task(_maybe_start_prepare_task(dest, dest.name))
                 return
             else:
                 await message.answer(f'Неподдерживаемый формат: {fname} ({mime}). Отправьте GIF или видео.')
