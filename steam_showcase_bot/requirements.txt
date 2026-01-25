@@ -1,0 +1,5 @@
+aiogram>=3.0.0b7
+Pillow>=9.0.0
+moviepy>=1.0.3
+python-dotenv>=0.21.0
+imageio-ffmpeg>=0.4.8

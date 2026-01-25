@@ -1,0 +1,104 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+*.pyd
+
+# Distribution / packaging
+.Python
+build/
+dist/
+downloads/
+*.egg-info/
+.installed.cfg
+pip-wheel-metadata/
+
+# Virtual environments (уже есть в корне проекта)
+# venv/ - удалить эту строку
+# .venv/ - удалить
+# env/ - удалить  
+# ENV/ - удалить
+env.bak/
+venv.bak/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django / Flask / DB
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+instance/
+.webassets-cache
+
+# Sphinx
+docs/_build/
+
+# Jupyter
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv / Poetry
+Pipfile.lock
+.poetry/
+
+# Editors / IDEs
+.vscode/
+*.code-workspace
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# Secrets & configs
+.env
+# config.py - удалить, это нужный файл
+config/*.json
+secrets.json
+*.pem
+*.key
+*.secret
+credentials
+# *.ini - удалить, если используются
+# *.cfg - удалить, если используются
+
+# Logs
+steam_showcase_bot.log  # добавить конкретный файл
+*.log
+logs/
+*.log.*
+
+# Misc
+coverage.xml
+*.cover
+.mypy_cache/
+.pyre/
+
+# Optional: large assets
+gifs/
