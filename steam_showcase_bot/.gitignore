@@ -103,3 +103,4 @@ coverage.xml
 # Optional: large assets
 gifs/
 prepared_gifs/
+sliced_gifs/

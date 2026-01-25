@@ -2,6 +2,7 @@ import os
 import asyncio
 from pathlib import Path
 import logging
+import shutil
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -29,13 +30,14 @@ except Exception:
     VideoFileClip = None  # type: ignore
     MOVIEPY_AVAILABLE = False
 
-# ffmpeg helper (resizer)
+# ffmpeg helper (resizer & slicer)
 try:
-    from .ffmpeg_utils import prepare_and_resize_copy, is_ffmpeg_available
+    from .ffmpeg_utils import prepare_and_resize_copy, is_ffmpeg_available, slice_video_inplace_with_gifs
     FFMPEG_UTILS_AVAILABLE = True
 except Exception:
     prepare_and_resize_copy = None
     is_ffmpeg_available = lambda: False  # type: ignore
+    slice_video_inplace_with_gifs = None
     FFMPEG_UTILS_AVAILABLE = False
 
 
@@ -204,11 +206,37 @@ async def handle_file(message: types.Message):
             prepared_dir = Path(__file__).parent / 'prepared_gifs'
             loop = asyncio.get_running_loop()
             try:
-                await loop.run_in_executor(None, prepare_and_resize_copy, src_path, prepared_dir)
+                # prepare_and_resize_copy may be None if ffmpeg helpers failed to import; assert to make intent explicit
+                assert prepare_and_resize_copy is not None
+                prepared = await loop.run_in_executor(None, prepare_and_resize_copy, src_path, prepared_dir)
                 try:
                     await message.answer(f'Подготовлено: {visible_name}')
                 except Exception:
                     pass
+
+                # Теперь копируем подготовленный файл в sliced_gifs и запускаем нарезку
+                try:
+                    slised_dir = Path(__file__).parent / 'sliced_gifs'
+                    slised_dir.mkdir(exist_ok=True)
+                    slised_copy = slised_dir / prepared.name
+                    shutil.copy2(prepared, slised_copy)
+                    logger.info('Copied prepared file to %s for slicing', slised_copy)
+
+                    if slice_video_inplace_with_gifs:
+                        await loop.run_in_executor(None, slice_video_inplace_with_gifs, slised_copy)
+                        try:
+                            await message.answer(f'Нарезано на части и GIFы созданы: {slised_copy.name}_gifs')
+                        except Exception:
+                            pass
+                    else:
+                        logger.debug('slice_video_inplace_with_gifs not available; skipping slicing')
+                except Exception as e:
+                    logger.exception('Ошибка при подготовке и нарезке файла %s', prepared)
+                    try:
+                        await message.answer(f'Ошибка при создании GIFов: {e}')
+                    except Exception:
+                        pass
+
             except Exception as e:
                 logger.exception('Ошибка подготовки файла %s', src_path)
                 try:

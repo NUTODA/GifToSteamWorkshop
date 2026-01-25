@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 import logging
 import shutil
+import json
 
 logger = logging.getLogger('steam_showcase_bot.ffmpeg_utils')
 
@@ -25,13 +26,13 @@ def resize_mp4_to_width_750(input_path: Path, output_path: Path) -> None:
     if not is_ffmpeg_available():
         raise RuntimeError("ffmpeg не найден: установите ffmpeg и добавьте его в PATH или задайте переменную окружения FFMPEG_BIN.")
 
-    input_path = str(Path(input_path))
-    output_path = str(Path(output_path))
+    input_str = str(Path(input_path))
+    output_str = str(Path(output_path))
 
     cmd = [
         FFMPEG_BIN,
         "-y",  # перезаписывать выходной файл
-        "-i", input_path,
+        "-i", input_str,
         "-vf", "scale='if(gt(iw,750),750,iw)':-2",
         "-c:v", "libx264",
         "-preset", "slow",
@@ -41,7 +42,7 @@ def resize_mp4_to_width_750(input_path: Path, output_path: Path) -> None:
     ]
 
     # добавляем выход в конце
-    cmd.append(output_path)
+    cmd.append(output_str)
 
     logger.debug('Running ffmpeg command: %s', ' '.join(cmd))
     try:
@@ -89,3 +90,96 @@ def prepare_and_resize_copy(src_path: Path, prepared_dir: Path) -> Path:
         except Exception:
             pass
         raise
+
+# --- Additional utilities: probe, gif creation, and slicing into parts ---
+
+# detect ffprobe binary similarly to ffmpeg
+FFPROBE_BIN = os.environ.get('FFPROBE_BIN') or shutil.which('ffprobe') or (os.path.join(os.path.dirname(FFMPEG_BIN), 'ffprobe') if FFMPEG_BIN and os.path.dirname(FFMPEG_BIN) else None)
+
+def is_ffprobe_available() -> bool:
+    """Return True if ffprobe is available."""
+    return bool(FFPROBE_BIN)
+
+
+def get_width_height(path: Path):
+    """Return (width, height) of first video stream using ffprobe. Raises RuntimeError if ffprobe missing or probe fails."""
+    if not is_ffprobe_available():
+        raise RuntimeError("ffprobe не найден: установите ffprobe и добавьте его в PATH или задайте переменную окружения FFPROBE_BIN.")
+    cmd = [
+        FFPROBE_BIN, "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "json", str(path)
+    ]
+    try:
+        out = subprocess.check_output(cmd, text=True)
+        data = json.loads(out)
+        w = data["streams"][0]["width"]
+        h = data["streams"][0]["height"]
+        return w, h
+    except Exception as e:
+        logger.error('ffprobe failed: %s', e)
+        raise RuntimeError(f"ffprobe error: {e}") from e
+
+
+def make_gif_from_video(input_path: Path, output_gif: Path, fps: int = 15, scale_w: int = -1):
+    """Create an optimized GIF from a video using ffmpeg. scale_w=-1 keeps width."""
+    if not is_ffmpeg_available():
+        raise RuntimeError("ffmpeg не найден: установите ffmpeg и добавьте его в PATH или задайте переменную окружения FFMPEG_BIN.")
+    vf = f"fps={fps},scale={scale_w}:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
+    cmd = [
+        FFMPEG_BIN, "-y", "-i", str(input_path),
+        "-vf", vf,
+        str(output_gif)
+    ]
+    logger.debug('Running ffmpeg for GIF: %s', ' '.join(cmd))
+    subprocess.check_call(cmd)
+
+
+def slice_video_inplace_with_gifs(path: str | Path):
+    """Slice a 750px-wide video into five 150px-wide parts.
+
+    Replaces the original file with the first part (inplace), writes parts 2..5 as separate files
+    next to the input, and creates a directory <stem>_gifs with part1.gif..part5.gif.
+    """
+    p = Path(path)
+    w, h = get_width_height(p)
+    if w != 750:
+        raise ValueError(f"Ожидалась ширина 750px, получено {w}px")
+
+    part_w = 150
+
+    # Temporary file for the first part so we can replace the original safely
+    tmp_first = p.with_name(f"{p.stem}__tmp_part1{p.suffix}")
+
+    part_paths = []
+
+    # Нарезка на 5 частей
+    for i in range(5):
+        x = i * part_w
+        out = tmp_first if i == 0 else p.with_name(f"{p.stem}_part{i+1}{p.suffix}")
+        cmd = [
+            FFMPEG_BIN, "-y", "-i", str(p),
+            "-vf", f"crop={part_w}:{h}:{x}:0",
+            "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+            "-c:a", "copy",
+            str(out)
+        ]
+        logger.debug('Running ffmpeg for slice: %s', ' '.join(cmd))
+        subprocess.check_call(cmd)
+        part_paths.append(out)
+
+    # Перезаписываем исходник первой частью
+    tmp_first.replace(p)
+    part_paths[0] = p  # обновляем путь первой части
+
+    # Создаём директорию для GIF
+    gif_dir = p.with_name(f"{p.stem}_gifs")
+    gif_dir.mkdir(exist_ok=True)
+
+    # Делаем 5 GIF-ов
+    for i, part in enumerate(part_paths, start=1):
+        gif_path = gif_dir / f"part{i}.gif"
+        logger.info('Creating GIF %s from %s', gif_path, part)
+        make_gif_from_video(part, gif_path, fps=15, scale_w=-1)
+
+    logger.info('Slicing complete. GIFs are in %s', gif_dir)
