@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.types import FSInputFile
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramNetworkError
 from .config import TELEGRAM_BOT_TOKEN as TOKEN, LOG_LEVEL, LOG_FILE, LOG_TO_FILE, SAVE_UPLOADS
 
 # configure logging early so logs are available during import-time checks
@@ -45,9 +46,29 @@ except Exception:
 if not TOKEN:
     logger.warning('Please set TELEGRAM_BOT_TOKEN in .env or environment')
 
-bot = Bot(token=TOKEN) if TOKEN else None
+# Configure aiohttp session for Bot with larger default timeout and configurable connector limit
+TELEGRAM_CLIENT_TIMEOUT = int(os.getenv('TELEGRAM_CLIENT_TIMEOUT', '300'))  # seconds (increased default to help large uploads)
+TELEGRAM_CLIENT_CONNECT_LIMIT = int(os.getenv('TELEGRAM_CLIENT_CONNECT_LIMIT', '0'))  # 0 == no limit
+session = None
+bot = None
+if TOKEN:
+    try:
+        import aiohttp
+        timeout = aiohttp.ClientTimeout(total=TELEGRAM_CLIENT_TIMEOUT)
+        # limit=0 => unlimited connections; useful when uploading large files
+        connector = aiohttp.TCPConnector(limit=TELEGRAM_CLIENT_CONNECT_LIMIT)
+        session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+        bot = Bot(token=TOKEN, session=session)
+    except Exception:
+        logger.exception('Failed to create aiohttp session for Bot; falling back to default')
+        bot = Bot(token=TOKEN)
+else:
+    bot = None
 dp = Dispatcher(storage=MemoryStorage())
 DEBUG_MODE = (LOG_LEVEL or '').upper() == 'DEBUG' or os.getenv('BOT_DEBUG', '') == '1'
+# Max archive size (MB) that the bot will attempt to send to the user. If the archive is
+# larger, it will be left on disk and the user will be informed.
+MAX_ARCHIVE_SEND_MB = int(os.getenv('MAX_ARCHIVE_SEND_MB', '50'))
 
 
 async def _debug_inspect(message: types.Message):
@@ -333,19 +354,55 @@ async def handle_file(message: types.Message):
                                 archive = Path(archive_path)
                                 if archive.exists():
                                     try:
-                                        await message.answer('Нарезка завершена — отправляю ZIP с GIFами.')
+                                        await message.answer('Нарезка завершена — формирую ZIP с GIFами и проверяю размер перед отправкой.')
                                     except Exception:
                                         pass
                                     try:
-                                        fsfile = FSInputFile(str(archive))
-                                        await message.answer_document(document=fsfile, caption=f'Архив GIF-ов: {archive.name}\nСодержит 5 частей для витрины Steam.')
-                                        logger.info('Sent ZIP %s to user %s', archive, getattr(message.from_user, 'id', None))
+                                        size_mb = archive.stat().st_size / (1024 * 1024)
+                                        if size_mb > MAX_ARCHIVE_SEND_MB:
+                                            logger.warning('Archive %s is too large (%.1f MB) to send to user (limit %d MB)', archive, size_mb, MAX_ARCHIVE_SEND_MB)
+                                            try:
+                                                await message.answer(f'Архив GIF-ов слишком большой для отправки ({size_mb:.1f} MB). Он создан локально и доступен на сервере.')
+                                            except Exception:
+                                                pass
+                                        else:
+                                            # Create FSInputFile for each attempt to avoid reusing potentially consumed handles
+                                            # Inform user and attempt send with retries and increased timeout
+                                            try:
+                                                await message.answer('Начинаю отправку архива. Это может занять некоторое время...')
+                                            except Exception:
+                                                pass
+                                            send_attempts = int(os.getenv('ZIP_SEND_RETRIES', '3'))
+                                            send_timeout = int(os.getenv('ZIP_SEND_TIMEOUT', '300'))  # seconds (increased default to reduce timeouts)
+                                            sent = False
+                                            for attempt in range(1, send_attempts + 1):
+                                                try:
+                                                    fsfile = FSInputFile(str(archive))
+                                                    await message.answer_document(document=fsfile, caption=f'Архив GIF-ов: {archive.name}\nСодержит 5 частей для витрины Steam.', timeout=send_timeout)
+                                                    logger.info('Sent ZIP %s to user %s (size=%.1fMB) on attempt %d', archive, getattr(message.from_user, 'id', None), size_mb, attempt)
+                                                    sent = True
+                                                    break
+                                                except TelegramNetworkError as e:
+                                                    logger.warning('Attempt %d: TelegramNetworkError when sending %s: %s', attempt, archive, e)
+                                                    if attempt < send_attempts:
+                                                        await asyncio.sleep(2 ** attempt)
+                                                    else:
+                                                        logger.exception('Failed to send ZIP archive %s to user after %d attempts', archive, send_attempts)
+                                                        try:
+                                                            await message.answer('Не удалось отправить архив по сети после нескольких попыток. Архив создан локально.')
+                                                        except Exception:
+                                                            pass
+                                                except Exception:
+                                                    logger.exception('Failed to send ZIP archive %s to user', archive)
+                                                    try:
+                                                        await message.answer('Не удалось отправить архив по сети. Архив создан локально.')
+                                                    except Exception:
+                                                        pass
+                                                    break
+                                            if not sent:
+                                                logger.warning('Archive %s was not sent to user %s', archive, getattr(message.from_user, 'id', None))
                                     except Exception:
-                                        logger.exception('Failed to send ZIP archive %s to user', archive)
-                                        try:
-                                            await message.answer('Не удалось отправить архив по сети. Архив создан локально.')
-                                        except Exception:
-                                            pass
+                                        logger.exception('Failed to process archive %s before sending', archive)
                                 else:
                                     logger.warning('Archive path returned but file missing: %s', archive_path)
                         except Exception:

@@ -17,8 +17,8 @@ def is_ffmpeg_available() -> bool:
 
 def resize_mp4_to_width_750(input_path: Path, output_path: Path) -> None:
     """
-    Уменьшает ширину видео до 750px (если больше), не кропает,
-    сохраняет пропорции, качество высокое (H.264, CRF 18).
+    Приводит ширину видео к 750px (включая апскейл, если исходная ширина меньше),
+    не кропает, сохраняет пропорции, качество высокое (H.264, CRF 18).
 
     input_path/output_path могут быть str или Path. Функция бросает
     RuntimeError при ошибке ffmpeg или если ffmpeg не найден.
@@ -33,7 +33,7 @@ def resize_mp4_to_width_750(input_path: Path, output_path: Path) -> None:
         FFMPEG_BIN,
         "-y",  # перезаписывать выходной файл
         "-i", input_str,
-        "-vf", "scale='if(gt(iw,750),750,iw)':-2",
+        "-vf", "scale=750:-2",
         "-c:v", "libx264",
         "-preset", "slow",
         "-crf", "18",
@@ -121,11 +121,17 @@ def get_width_height(path: Path):
         raise RuntimeError(f"ffprobe error: {e}") from e
 
 
-def make_gif_from_video(input_path: Path, output_gif: Path, fps: int = 15, scale_w: int = -1):
-    """Create an optimized GIF from a video using ffmpeg. scale_w=-1 keeps width."""
+def make_gif_from_video(input_path: Path, output_gif: Path, fps: int = 12, scale_w: int = -1, max_colors: int = 128):
+    """Create an optimized GIF from a video using ffmpeg.
+
+    To keep generated GIF sizes reasonable (targeting ~<=5MB per GIF), we use a
+    moderate fps, limit palette colors, and apply a mild dither. If scale_w is -1,
+    the input width is preserved; otherwise the GIF width is set to `scale_w`.
+    """
     if not is_ffmpeg_available():
         raise RuntimeError("ffmpeg не найден: установите ffmpeg и добавьте его в PATH или задайте переменную окружения FFMPEG_BIN.")
-    vf = f"fps={fps},scale={scale_w}:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
+    # build filter chain with controlled palette size and dither to reduce GIF size
+    vf = f"fps={fps},scale={scale_w}:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors={max_colors}[p];[s1][p]paletteuse=dither=bayer"
     cmd = [
         FFMPEG_BIN, "-y", "-i", str(input_path),
         "-vf", vf,
@@ -143,7 +149,6 @@ def make_gif_from_video(input_path: Path, output_gif: Path, fps: int = 15, scale
         _fix_gif_terminator(output_gif)
     except Exception:
         logger.exception('Failed to adjust GIF terminator for %s', output_gif)
-
 
 def _fix_gif_terminator(gif_path: Path) -> bool:
     """If last byte of GIF is 0x3B, replace it with 0x21. Returns True if changed."""
@@ -217,11 +222,18 @@ def slice_video_inplace_with_gifs(path: str | Path):
     gif_dir = p.with_name(f"{p.stem}_gifs")
     gif_dir.mkdir(exist_ok=True)
 
-    # Делаем 5 GIF-ов
+    # Делаем 5 GIF-ов — используем мягкий апскейл и лимиты, чтобы GIFы были компактнее (~<=5MB)
     for i, part in enumerate(part_paths, start=1):
         gif_path = gif_dir / f"part{i}.gif"
         logger.info('Creating GIF %s from %s', gif_path, part)
-        make_gif_from_video(part, gif_path, fps=15, scale_w=-1)
+        # Each sliced part is 150px wide; ensure GIF stays compact by forcing 150px width,
+        # using slightly lower fps and reduced palette size.
+        make_gif_from_video(part, gif_path, fps=12, scale_w=150, max_colors=128)
+        try:
+            size_kb = gif_path.stat().st_size / 1024
+            logger.info('Created GIF %s (%.1f KB)', gif_path, size_kb)
+        except Exception:
+            logger.exception('Failed to stat GIF %s after creation', gif_path)
 
     logger.info('Slicing complete. GIFs are in %s', gif_dir)
 
