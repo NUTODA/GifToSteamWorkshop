@@ -46,24 +46,19 @@ except Exception:
 if not TOKEN:
     logger.warning('Please set TELEGRAM_BOT_TOKEN in .env or environment')
 
-# Configure aiohttp session for Bot with larger default timeout and configurable connector limit
+# Configure aiohttp settings (do NOT create ClientSession at import time — it requires a running event loop)
 TELEGRAM_CLIENT_TIMEOUT = int(os.getenv('TELEGRAM_CLIENT_TIMEOUT', '300'))  # seconds (increased default to help large uploads)
 TELEGRAM_CLIENT_CONNECT_LIMIT = int(os.getenv('TELEGRAM_CLIENT_CONNECT_LIMIT', '0'))  # 0 == no limit
+# session will be created lazily at runtime (inside async startup) to avoid "no running event loop" errors
 session = None
-bot = None
-if TOKEN:
-    try:
-        import aiohttp
-        timeout = aiohttp.ClientTimeout(total=TELEGRAM_CLIENT_TIMEOUT)
-        # limit=0 => unlimited connections; useful when uploading large files
-        connector = aiohttp.TCPConnector(limit=TELEGRAM_CLIENT_CONNECT_LIMIT)
-        session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-        bot = Bot(token=TOKEN, session=session)
-    except Exception:
-        logger.exception('Failed to create aiohttp session for Bot; falling back to default')
-        bot = Bot(token=TOKEN)
-else:
-    bot = None
+bot = Bot(token=TOKEN) if TOKEN else None
+# store aiohttp creation parameters for use in the async startup
+_aiohttp_settings = {
+    'timeout_seconds': TELEGRAM_CLIENT_TIMEOUT,
+    'connect_limit': TELEGRAM_CLIENT_CONNECT_LIMIT,
+}
+
+# If TOKEN is not set, bot is None and rest of the code will behave accordingly.
 dp = Dispatcher(storage=MemoryStorage())
 DEBUG_MODE = (LOG_LEVEL or '').upper() == 'DEBUG' or os.getenv('BOT_DEBUG', '') == '1'
 # Max archive size (MB) that the bot will attempt to send to the user. If the archive is
@@ -535,6 +530,53 @@ if DEBUG_MODE:
             pass
 
 
+# Public startup/shutdown hooks — create/close aiohttp session when the event loop is available.
+# Exported so tests can call them directly.
+async def on_startup() -> None:
+    """Create aiohttp.ClientSession and attach to `bot` if not present."""
+    if not TOKEN:
+        logger.debug('on_startup: TELEGRAM_BOT_TOKEN not set; skipping session creation')
+        return
+    # If a session already exists, assume it's managed externally and do nothing
+    if getattr(bot, 'session', None) is not None:
+        logger.debug('on_startup: bot.session already present; skipping creation')
+        bot._created_session = False
+        return
+
+    try:
+        import aiohttp
+        timeout = aiohttp.ClientTimeout(total=_aiohttp_settings['timeout_seconds'])
+        connector = None
+        if _aiohttp_settings.get('connect_limit', 0) != 0:
+            connector = aiohttp.TCPConnector(limit=_aiohttp_settings['connect_limit'])
+        session = aiohttp.ClientSession(timeout=timeout, connector=connector) if connector is not None else aiohttp.ClientSession(timeout=timeout)
+        bot.session = session
+        bot._created_session = True
+        logger.debug('on_startup: created aiohttp ClientSession (connect_limit=%s)', _aiohttp_settings.get('connect_limit'))
+    except Exception:
+        logger.exception('on_startup: failed to create aiohttp ClientSession; continuing without custom session')
+        bot._created_session = False
+
+
+async def on_shutdown() -> None:
+    """Close session only if it was created by on_startup."""
+    sess = getattr(bot, 'session', None)
+    if not sess:
+        logger.debug('on_shutdown: no session to close')
+        return
+    if not getattr(bot, '_created_session', False):
+        logger.debug('on_shutdown: session not created by this module; leaving it intact')
+        return
+    try:
+        await sess.close()
+        logger.debug('on_shutdown: closed aiohttp session')
+    except Exception:
+        logger.exception('on_shutdown: error while closing session')
+    finally:
+        # Keep the attribute but mark it closed for callers
+        bot._created_session = False
+
+
 if __name__ == '__main__':
     import logging
 
@@ -546,8 +588,18 @@ if __name__ == '__main__':
     async def _main():
         try:
             logger.info('Starting polling...')
-            await dp.start_polling(bot)
+            try:
+                # Pass startup/shutdown hooks to Dispatcher; aiogram will call them while loop is running
+                await dp.start_polling(bot, on_startup=on_startup, on_shutdown=on_shutdown)
+            except asyncio.CancelledError:
+                logger.info('Polling task cancelled, shutting down')
+            except KeyboardInterrupt:
+                logger.info('KeyboardInterrupt received, shutting down')
         finally:
-            await bot.session.close()
+            # Ensure shutdown hook runs if start_polling exited unexpectedly
+            try:
+                await on_shutdown()
+            except Exception:
+                logger.exception('Error while running on_shutdown()')
 
     asyncio.run(_main())
