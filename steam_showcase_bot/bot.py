@@ -47,7 +47,7 @@ if not TOKEN:
     logger.warning('Please set TELEGRAM_BOT_TOKEN in .env or environment')
 
 # Configure aiohttp settings (do NOT create ClientSession at import time — it requires a running event loop)
-TELEGRAM_CLIENT_TIMEOUT = int(os.getenv('TELEGRAM_CLIENT_TIMEOUT', '300'))  # seconds (increased default to help large uploads)
+TELEGRAM_CLIENT_TIMEOUT = int(os.getenv('TELEGRAM_CLIENT_TIMEOUT', '600'))  # seconds (increased default to help large uploads)
 TELEGRAM_CLIENT_CONNECT_LIMIT = int(os.getenv('TELEGRAM_CLIENT_CONNECT_LIMIT', '0'))  # 0 == no limit
 # session will be created lazily at runtime (inside async startup) to avoid "no running event loop" errors
 session = None
@@ -368,7 +368,7 @@ async def handle_file(message: types.Message):
                                             except Exception:
                                                 pass
                                             send_attempts = int(os.getenv('ZIP_SEND_RETRIES', '3'))
-                                            send_timeout = int(os.getenv('ZIP_SEND_TIMEOUT', '300'))  # seconds (increased default to reduce timeouts)
+                                            send_timeout = int(os.getenv('ZIP_SEND_TIMEOUT', '600'))  # seconds (increased default to reduce timeouts)
                                             sent = False
                                             for attempt in range(1, send_attempts + 1):
                                                 try:
