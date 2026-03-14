@@ -21,6 +21,8 @@ ZIP_SEND_TIMEOUT = int(os.getenv('ZIP_SEND_TIMEOUT', '300'))
 RATE_LIMIT_SECONDS = float(os.getenv('RATE_LIMIT_SECONDS', '30'))
 MAX_CONCURRENT_TASKS = int(os.getenv('MAX_CONCURRENT_TASKS', '3'))
 MAX_FILE_SIZE_MB = int(os.getenv('MAX_FILE_SIZE_MB', '20'))
+FSM_STORAGE = os.getenv('FSM_STORAGE', 'memory').strip().lower()
+REDIS_URL = os.getenv('REDIS_URL', '').strip()
 
 SHUTDOWN_TASK_WAIT_TIMEOUT = int(os.getenv('SHUTDOWN_TASK_WAIT_TIMEOUT', '30'))
 FFMPEG_TERMINATE_TIMEOUT = int(os.getenv('FFMPEG_TERMINATE_TIMEOUT', '5'))

@@ -14,6 +14,7 @@ from .config import (
     RATE_LIMIT_SECONDS, MAX_CONCURRENT_TASKS, DEBUG_MODE,
     SHUTDOWN_TASK_WAIT_TIMEOUT, FFMPEG_TERMINATE_TIMEOUT,
     HEARTBEAT_FILE, HEARTBEAT_INTERVAL_SECONDS,
+    FSM_STORAGE, REDIS_URL,
 )
 from .handlers import register_routers
 from .handlers.media import router as media_router
@@ -41,7 +42,29 @@ if not TOKEN:
     logger.warning('Please set TELEGRAM_BOT_TOKEN in .env or environment')
 
 bot = Bot(token=TOKEN) if TOKEN else None
-dp = Dispatcher(storage=MemoryStorage())
+
+
+def _build_fsm_storage():
+    if FSM_STORAGE == 'redis':
+        if not REDIS_URL:
+            logger.warning('FSM_STORAGE=redis, но REDIS_URL пуст. Использую MemoryStorage.')
+            return MemoryStorage()
+        try:
+            from aiogram.fsm.storage.redis import RedisStorage
+            logger.info('FSM storage: RedisStorage')
+            return RedisStorage.from_url(REDIS_URL)
+        except Exception:
+            logger.exception('Не удалось инициализировать RedisStorage. Использую MemoryStorage.')
+            return MemoryStorage()
+
+    if FSM_STORAGE != 'memory':
+        logger.warning('Неизвестное значение FSM_STORAGE=%s. Использую MemoryStorage.', FSM_STORAGE)
+
+    logger.info('FSM storage: MemoryStorage')
+    return MemoryStorage()
+
+
+dp = Dispatcher(storage=_build_fsm_storage())
 
 _custom_session: AiohttpSession | None = None
 

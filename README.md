@@ -163,7 +163,7 @@ python -m steam_showcase_bot
 docker compose up -d --build
 ```
 
-Контейнер соберётся (~2–3 мин при первом запуске: установка ffmpeg + зависимостей), после чего бот запустится в фоновом режиме.
+Compose поднимет два сервиса: `bot` и `redis`. Контейнер бота соберётся (~2–3 мин при первом запуске: установка ffmpeg + зависимостей), после чего запустится в фоновом режиме.
 
 ### Управление
 
@@ -194,6 +194,7 @@ docker compose ps
 | `prepared_gifs` | `/app/steam_showcase_bot/prepared_gifs` | Ресайзнутые MP4 |
 | `sliced_gifs` | `/app/steam_showcase_bot/sliced_gifs` | Нарезанные части и ZIP |
 | `logs` | `/app/steam_showcase_bot/logs` | Лог-файлы |
+| `redis_data` | `/data` | Персистентные данные Redis (FSM состояния) |
 
 Данные в volumes **не удаляются** при пересборке образа. Для полной очистки: `docker compose down -v`.
 
@@ -218,6 +219,8 @@ docker compose ps
 | `MAX_ARCHIVE_SEND_MB` | `50` | Максимальный размер ZIP для отправки (MB); если больше — архив остаётся на диске |
 | `RATE_LIMIT_SECONDS` | `30` | Минимальный интервал между файлами от одного пользователя (сек) |
 | `MAX_CONCURRENT_TASKS` | `3` | Максимум параллельных задач ffmpeg |
+| `FSM_STORAGE` | `memory` | Хранилище FSM: `memory` (локально) или `redis` (production) |
+| `REDIS_URL` | — | URL Redis для FSM (например `redis://redis:6379/0`) |
 | `ZIP_SEND_RETRIES` | `3` | Количество попыток отправки ZIP при сетевой ошибке |
 | `ZIP_SEND_TIMEOUT` | `300` | Таймаут одной попытки отправки ZIP (сек) |
 | `SHUTDOWN_TASK_WAIT_TIMEOUT` | `30` | Сколько ждать активные задачи при shutdown перед принудительной отменой (сек) |
@@ -236,6 +239,7 @@ docker compose ps
 | Python | 3.10+ | Основной язык |
 | [aiogram](https://docs.aiogram.dev/) | ≥ 3.0.0b7 | Асинхронный Telegram Bot API |
 | [python-dotenv](https://github.com/theskumar/python-dotenv) | ≥ 0.21.0 | Загрузка `.env` |
+| [redis-py](https://github.com/redis/redis-py) | ≥ 5.0.0 | FSM-хранилище RedisStorage |
 | ffmpeg / ffprobe | любая актуальная | Ресайз, нарезка, конвертация в GIF |
 
 ---
@@ -286,7 +290,7 @@ Aiogram-роутеры: `commands.py` (`/start`, `/help`), `callbacks.py` (inlin
 
 2. **Большие архивы.** Если результирующий ZIP превышает `MAX_ARCHIVE_SEND_MB` (50 MB по умолчанию), файл остаётся на диске сервера и пользователь получает уведомление.
 
-3. **Хранилище состояний.** Используется `MemoryStorage` — состояния FSM теряются при перезапуске бота. Для production рекомендуется `RedisStorage`.
+3. **FSM-хранилище.** По умолчанию используется `MemoryStorage` (удобно для локальной разработки). Для production включайте `FSM_STORAGE=redis` и задавайте `REDIS_URL`.
 
 ---
 
