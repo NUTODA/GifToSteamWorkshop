@@ -1,8 +1,8 @@
 import logging
 
-from aiogram import Router, types, F
+from aiogram import F, Router, types
 
-from ..texts import help_text, about_showcase_text
+from ..texts import about_showcase_text, help_text
 
 logger = logging.getLogger('steam_showcase_bot.handlers.callbacks')
 

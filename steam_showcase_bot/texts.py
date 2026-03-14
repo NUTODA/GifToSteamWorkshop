@@ -2,9 +2,8 @@ import html as _html_module
 import os
 
 from aiogram import types
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardMarkup
-
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 STEP_SCALE = 1
 STEP_SLICE = 2
@@ -69,16 +68,16 @@ def help_text() -> str:
 
 def about_showcase_text() -> str:
     return (
-        f'🎮 <b>Витрина Steam (Steam Showcase)</b>\n\n'
-        f'Витрина — раздел профиля Steam, где можно разместить анимированные GIF-картинки. '
-        f'Она состоит из <b>5 горизонтальных слотов</b>, каждый шириной <code>150 px</code>.\n\n'
-        f'Чтобы анимация выглядела как единое целое, нужно:\n'
-        f'1. Взять видео шириной <code>750 px</code> (5 × 150 px)\n'
-        f'2. Разрезать на 5 равных частей\n'
-        f'3. Загрузить каждую часть в соответствующий слот\n\n'
-        f'<b>Именно это я делаю автоматически!</b> 🎉\n\n'
-        f'Управление Витриной:\n'
-        f'<code>steamcommunity.com → Профиль → Редактировать → Витрина</code>'
+        '🎮 <b>Витрина Steam (Steam Showcase)</b>\n\n'
+        'Витрина — раздел профиля Steam, где можно разместить анимированные GIF-картинки. '
+        'Она состоит из <b>5 горизонтальных слотов</b>, каждый шириной <code>150 px</code>.\n\n'
+        'Чтобы анимация выглядела как единое целое, нужно:\n'
+        '1. Взять видео шириной <code>750 px</code> (5 × 150 px)\n'
+        '2. Разрезать на 5 равных частей\n'
+        '3. Загрузить каждую часть в соответствующий слот\n\n'
+        '<b>Именно это я делаю автоматически!</b> 🎉\n\n'
+        'Управление Витриной:\n'
+        '<code>steamcommunity.com → Профиль → Редактировать → Витрина</code>'
     )
 
 

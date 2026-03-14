@@ -1,7 +1,7 @@
 from aiogram import Dispatcher
 
-from .commands import router as commands_router
 from .callbacks import router as callbacks_router
+from .commands import router as commands_router
 from .media import router as media_router
 
 

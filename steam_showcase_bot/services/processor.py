@@ -4,16 +4,22 @@ import shutil
 from pathlib import Path
 
 from aiogram import Bot
-from aiogram.types import Message, FSInputFile
 from aiogram.exceptions import TelegramNetworkError
+from aiogram.types import FSInputFile, Message
 
 from ..config import MAX_ARCHIVE_SEND_MB, ZIP_SEND_RETRIES, ZIP_SEND_TIMEOUT
-from ..texts import (
-    esc, edit_status,
-    STEP_SCALE, STEP_SLICE, STEP_GIFS, STEP_DONE,
-)
 from ..ffmpeg_utils import (
-    prepare_and_resize_copy, is_ffmpeg_available, slice_video_inplace_with_gifs,
+    is_ffmpeg_available,
+    prepare_and_resize_copy,
+    slice_video_inplace_with_gifs,
+)
+from ..texts import (
+    STEP_DONE,
+    STEP_GIFS,
+    STEP_SCALE,
+    STEP_SLICE,
+    edit_status,
+    esc,
 )
 
 logger = logging.getLogger('steam_showcase_bot.processor')

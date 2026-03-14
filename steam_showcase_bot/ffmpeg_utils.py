@@ -1,11 +1,11 @@
-import os
-import subprocess
-from pathlib import Path
-import logging
-import shutil
 import json
+import logging
+import os
+import shutil
+import subprocess
 import threading
 import time
+from pathlib import Path
 
 logger = logging.getLogger('steam_showcase_bot.ffmpeg_utils')
 

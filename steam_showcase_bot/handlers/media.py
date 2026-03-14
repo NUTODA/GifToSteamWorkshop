@@ -3,11 +3,11 @@ import datetime
 import logging
 from pathlib import Path
 
-from aiogram import Bot, Router, Dispatcher, types
+from aiogram import Bot, Dispatcher, Router, types
 
 from ..config import MAX_FILE_SIZE_MB
-from ..texts import esc, edit_status
 from ..services.processor import ProcessingService
+from ..texts import edit_status, esc
 
 logger = logging.getLogger('steam_showcase_bot.handlers.media')
 

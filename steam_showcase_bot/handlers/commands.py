@@ -3,7 +3,7 @@ import logging
 from aiogram import Router, types
 from aiogram.filters import Command
 
-from ..texts import welcome_text, welcome_markup, help_text
+from ..texts import help_text, welcome_markup, welcome_text
 
 logger = logging.getLogger('steam_showcase_bot.handlers.commands')
 

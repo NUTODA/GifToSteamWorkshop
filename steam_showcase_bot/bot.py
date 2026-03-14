@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
@@ -8,19 +7,28 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from .config import (
-    TELEGRAM_BOT_TOKEN as TOKEN,
-    LOG_LEVEL, LOG_FILE, LOG_TO_FILE,
-    TELEGRAM_CLIENT_TIMEOUT, TELEGRAM_CLIENT_CONNECT_LIMIT,
-    RATE_LIMIT_SECONDS, MAX_CONCURRENT_TASKS, DEBUG_MODE,
-    SHUTDOWN_TASK_WAIT_TIMEOUT, FFMPEG_TERMINATE_TIMEOUT,
-    HEARTBEAT_FILE, HEARTBEAT_INTERVAL_SECONDS,
-    FSM_STORAGE, REDIS_URL,
+    FFMPEG_TERMINATE_TIMEOUT,
+    FSM_STORAGE,
+    HEARTBEAT_FILE,
+    HEARTBEAT_INTERVAL_SECONDS,
+    LOG_FILE,
+    LOG_LEVEL,
+    LOG_TO_FILE,
+    MAX_CONCURRENT_TASKS,
+    RATE_LIMIT_SECONDS,
+    REDIS_URL,
+    SHUTDOWN_TASK_WAIT_TIMEOUT,
+    TELEGRAM_CLIENT_CONNECT_LIMIT,
+    TELEGRAM_CLIENT_TIMEOUT,
 )
+from .config import (
+    TELEGRAM_BOT_TOKEN as TOKEN,
+)
+from .ffmpeg_utils import terminate_running_ffmpeg_processes
 from .handlers import register_routers
 from .handlers.media import router as media_router
 from .middlewares.throttling import ThrottlingMiddleware
 from .services.processor import ProcessingService
-from .ffmpeg_utils import terminate_running_ffmpeg_processes
 
 logger = logging.getLogger('steam_showcase_bot')
 numeric_level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)

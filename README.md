@@ -240,6 +240,7 @@ docker compose ps
 | [aiogram](https://docs.aiogram.dev/) | ≥ 3.0.0b7 | Асинхронный Telegram Bot API |
 | [python-dotenv](https://github.com/theskumar/python-dotenv) | ≥ 0.21.0 | Загрузка `.env` |
 | [redis-py](https://github.com/redis/redis-py) | ≥ 5.0.0 | FSM-хранилище RedisStorage |
+| [ruff](https://docs.astral.sh/ruff/) | ≥ 0.15.6 | Линтинг Python-кода |
 | ffmpeg / ffprobe | любая актуальная | Ресайз, нарезка, конвертация в GIF |
 
 ---
@@ -295,6 +296,16 @@ Aiogram-роутеры: `commands.py` (`/start`, `/help`), `callbacks.py` (inlin
 ---
 
 ## Разработка и отладка
+
+### Линтинг (ruff)
+
+```bash
+# Проверить проект
+venv/bin/ruff check .
+
+# Автоисправить безопасные замечания (по необходимости)
+venv/bin/ruff check . --fix
+```
 
 ### Отладочный режим
 

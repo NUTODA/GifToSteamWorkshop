@@ -5,8 +5,6 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
 from aiogram.types import Message
 
-from ..texts import esc
-
 logger = logging.getLogger('steam_showcase_bot.throttling')
 
 

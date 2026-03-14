@@ -1,8 +1,7 @@
-import sys
 import time
 from pathlib import Path
 
-from .config import HEARTBEAT_FILE, HEALTHCHECK_MAX_STALENESS_SECONDS
+from .config import HEALTHCHECK_MAX_STALENESS_SECONDS, HEARTBEAT_FILE
 from .ffmpeg_utils import is_ffmpeg_available
 
 
