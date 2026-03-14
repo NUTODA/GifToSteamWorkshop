@@ -241,6 +241,7 @@ docker compose ps
 | [python-dotenv](https://github.com/theskumar/python-dotenv) | ≥ 0.21.0 | Загрузка `.env` |
 | [redis-py](https://github.com/redis/redis-py) | ≥ 5.0.0 | FSM-хранилище RedisStorage |
 | [ruff](https://docs.astral.sh/ruff/) | ≥ 0.15.6 | Линтинг Python-кода |
+| [pytest](https://docs.pytest.org/) | ≥ 9.0.2 | Автотесты проекта |
 | ffmpeg / ffprobe | любая актуальная | Ресайз, нарезка, конвертация в GIF |
 
 ---
@@ -306,6 +307,18 @@ venv/bin/ruff check .
 # Автоисправить безопасные замечания (по необходимости)
 venv/bin/ruff check . --fix
 ```
+
+### Тестирование (pytest)
+
+```bash
+venv/bin/python -m pytest -q steam_showcase_bot/tests
+```
+
+### CI/CD (GitHub Actions)
+
+При каждом `push` и `pull request` запускается workflow `.github/workflows/ci.yml`, который выполняет:
+- `ruff check .`
+- `pytest -q steam_showcase_bot/tests`
 
 ### Отладочный режим
 
