@@ -122,7 +122,7 @@ async def handle_file(message: types.Message, bot: Bot, processor: ProcessingSer
         )
 
     except Exception as e:
-        logger.exception('Ошибка при сохранении файла')
+        logger.exception('Error while saving file')
         await message.answer(
             f'❌ <b>Ошибка при скачивании файла:</b>\n'
             f'<code>{esc(str(e)[:300])}</code>',

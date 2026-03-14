@@ -114,7 +114,7 @@ class ProcessingService:
             try:
                 archive_path = await loop.run_in_executor(None, slice_video_inplace_with_gifs, sliced_copy)
             except Exception as e:
-                logger.exception('Ошибка при нарезке файла %s', sliced_copy)
+                logger.exception('Error while slicing file %s', sliced_copy)
                 await _upd(0, failed_at=STEP_GIFS, error_msg=str(e))
                 for path in (sliced_copy, prepared, src_path):
                     self._safe_unlink(path)
@@ -138,7 +138,7 @@ class ProcessingService:
             await self._send_archive(archive_path, message, user_id)
 
         except Exception as e:
-            logger.exception('Ошибка подготовки файла %s', src_path)
+            logger.exception('Error while preparing file %s', src_path)
             await _upd(0, failed_at=STEP_SCALE, error_msg=str(e))
             for path in (prepared_dir / src_path.name, src_path):
                 self._safe_unlink(path)

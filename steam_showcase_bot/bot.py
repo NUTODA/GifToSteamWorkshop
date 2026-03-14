@@ -55,18 +55,18 @@ bot = Bot(token=TOKEN) if TOKEN else None
 def _build_fsm_storage():
     if FSM_STORAGE == 'redis':
         if not REDIS_URL:
-            logger.warning('FSM_STORAGE=redis, но REDIS_URL пуст. Использую MemoryStorage.')
+            logger.warning('FSM_STORAGE=redis, but REDIS_URL is empty. Using MemoryStorage.')
             return MemoryStorage()
         try:
             from aiogram.fsm.storage.redis import RedisStorage
             logger.info('FSM storage: RedisStorage')
             return RedisStorage.from_url(REDIS_URL)
         except Exception:
-            logger.exception('Не удалось инициализировать RedisStorage. Использую MemoryStorage.')
+            logger.exception('Failed to initialize RedisStorage. Using MemoryStorage.')
             return MemoryStorage()
 
     if FSM_STORAGE != 'memory':
-        logger.warning('Неизвестное значение FSM_STORAGE=%s. Использую MemoryStorage.', FSM_STORAGE)
+        logger.warning('Unknown FSM_STORAGE value=%s. Using MemoryStorage.', FSM_STORAGE)
 
     logger.info('FSM storage: MemoryStorage')
     return MemoryStorage()

@@ -80,7 +80,7 @@ def terminate_running_ffmpeg_processes(grace_timeout: float = 5.0) -> tuple[int,
         try:
             proc.terminate()
         except Exception:
-            logger.exception('Не удалось отправить terminate для ffmpeg pid=%s', getattr(proc, 'pid', None))
+            logger.exception('Failed to send terminate to ffmpeg pid=%s', getattr(proc, 'pid', None))
 
     deadline = time.monotonic() + max(0.0, grace_timeout)
     killed_count = 0
@@ -95,9 +95,9 @@ def terminate_running_ffmpeg_processes(grace_timeout: float = 5.0) -> tuple[int,
                 proc.kill()
                 killed_count += 1
             except Exception:
-                logger.exception('Не удалось принудительно завершить ffmpeg pid=%s', getattr(proc, 'pid', None))
+                logger.exception('Failed to force-kill ffmpeg pid=%s', getattr(proc, 'pid', None))
         except Exception:
-            logger.exception('Ошибка при ожидании завершения ffmpeg pid=%s', getattr(proc, 'pid', None))
+            logger.exception('Error while waiting for ffmpeg pid=%s to exit', getattr(proc, 'pid', None))
         finally:
             _untrack_ffmpeg_process(proc)
 
