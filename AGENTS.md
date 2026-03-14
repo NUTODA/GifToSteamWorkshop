@@ -1,0 +1,171 @@
+# AGENTS.md — Инструкции для AI-агентов
+
+Этот файл содержит полный контекст проекта, соглашения по разработке и руководство по внесению изменений для будущих AI-агентов.
+
+---
+
+## Краткое описание проекта
+
+**GifToSteamWorkshop** — Telegram-бот на Python (aiogram 3.x), который принимает GIF или MP4-видео, масштабирует их до 750px в ширину, нарезает на 5 частей по 150px и конвертирует каждую часть в `.gif` для загрузки в слоты Витрины Steam. Результат отправляется пользователю как ZIP-архив.
+
+---
+
+## Структура кода
+
+```
+steam_showcase_bot/
+├── bot.py           ← Telegram-хендлеры, точка входа (__main__)
+├── config.py        ← чтение переменных окружения через python-dotenv
+├── ffmpeg_utils.py  ← вся логика ffmpeg: resize, slice, gif, archive
+├── requirements.txt ← pip-зависимости
+├── .env             ← секреты (НЕ в git)
+└── .env.example     ← шаблон конфига
+```
+
+Рабочие директории создаются автоматически при первом запуске:
+- `steam_showcase_bot/gifs/` — оригинальные загрузки
+- `steam_showcase_bot/prepared_gifs/` — ресайзнутые копии
+- `steam_showcase_bot/sliced_gifs/` — нарезанные части + итоговый ZIP
+
+---
+
+## Ключевые технические детали
+
+### Поток обработки файла
+
+1. `bot.py → handle_file()` — скачивает файл в `gifs/`, запускает фоновую задачу через `asyncio.create_task()`
+2. `_maybe_start_prepare_task()` — проверяет ffmpeg, принимает только `.mp4`
+3. `ffmpeg_utils.prepare_and_resize_copy()` — масштабирует до 750px → `prepared_gifs/`
+4. `ffmpeg_utils.slice_video_inplace_with_gifs()` — нарезает на 5 частей по 150px, создаёт GIF, архивирует в ZIP
+5. Бот отправляет ZIP пользователю с retry (до 3 попыток)
+6. Удаляет все промежуточные файлы
+
+### ffmpeg-команды (важно понимать)
+
+**Ресайз до 750px:**
+```
+ffmpeg -y -i input.mp4 -vf scale=750:-2 -c:v libx264 -preset slow -crf 18 -pix_fmt yuv420p -c:a copy output.mp4
+```
+
+**Нарезка части `i` (0-based), ширина 150px:**
+```
+ffmpeg -y -i input.mp4 -vf "crop=150:h:i*150:0" -c:v libx264 -crf 18 -preset medium -c:a copy part.mp4
+```
+
+**Конвертация в GIF:**
+```
+ffmpeg -y -i part.mp4 -vf "fps=12,scale=150:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer" output.gif
+```
+
+### _fix_gif_terminator — критически важная правка
+
+После генерации каждого GIF последний байт `0x3B` (стандартный GIF89a-терминатор) заменяется на `0x21`. Это необходимо для корректного отображения анимации в движке Steam. **Не удалять и не отключать эту функцию без тестирования в Steam.**
+
+### Обнаружение ffmpeg
+
+`ffmpeg_utils.py` ищет ffmpeg в следующем порядке:
+1. Переменная окружения `FFMPEG_BIN`
+2. `shutil.which('ffmpeg')` (системный PATH)
+
+Для ffprobe аналогично: `FFPROBE_BIN` → `shutil.which('ffprobe')` → директория рядом с ffmpeg.
+
+### Известная проблема с aiohttp-сессией
+
+В `bot.py` `aiohttp.ClientSession` создаётся на уровне модуля (вне event loop). При импорте может появиться предупреждение `RuntimeError: no running event loop`. Бот при этом корректно продолжает работу, используя дефолтную сессию aiogram. **Это известная техническая задолженность** — в будущем сессию следует создавать внутри `async def _main()` или через `on_startup`-хук aiogram.
+
+---
+
+## Соглашения по разработке
+
+### Язык кода
+- Код на Python, комментарии и сообщения пользователю — на **русском**
+- Логи (`logger.*`) — на **русском** или английском (уже смешано, не переписывать)
+
+### Принципы внесения изменений
+
+1. **Не трогать `_fix_gif_terminator`** без явного тестирования результата в Steam
+2. **Все вызовы ffmpeg** должны идти через `ffmpeg_utils.py`, не в `bot.py` напрямую
+3. **Асинхронный контекст:** тяжёлые синхронные операции (ffmpeg) запускаются через `loop.run_in_executor(None, func, *args)`, не блокируя event loop
+4. **Очистка файлов:** промежуточные файлы ОБЯЗАТЕЛЬНО удаляются после успешной обработки. При ошибке — тоже пытаться почистить артефакты
+5. **Retry при отправке:** при `TelegramNetworkError` повторять до `ZIP_SEND_RETRIES` раз с экспоненциальной паузой (`2^attempt` сек)
+
+### Добавление новых зависимостей
+
+- Добавлять в `steam_showcase_bot/requirements.txt`
+- Указывать минимальную версию: `package>=X.Y.Z`
+- Обновлять раздел «Технологический стек» в `README.md`
+
+### Переменные окружения
+
+- Все новые конфигурационные параметры добавлять через `os.getenv()` в `bot.py` или в `config.py`
+- Если параметр критичный — добавить в `.env.example` с примером значения
+- Документировать в таблице «Конфигурация» в `README.md`
+
+---
+
+## Что можно улучшить (известная техническая задолженность)
+
+| # | Проблема | Приоритет |
+|---|---|---|
+| 1 | `aiohttp.ClientSession` создаётся вне event loop | Средний |
+| 2 | `MemoryStorage` для FSM — состояния теряются при перезапуске | Средний |
+| 3 | `moviepy` и `imageio-ffmpeg` в зависимостях, но не используются | Низкий |
+| 4 | Нет unit-тестов для `ffmpeg_utils.py` | Высокий |
+| 5 | Нет обработки случая, когда исходное видео шире 750px и нужен downscale | Средний |
+| 6 | Нет rate limiting — один пользователь может запустить много задач параллельно | Средний |
+| 7 | Логи смешаны (рус/англ) | Низкий |
+
+---
+
+## Как запустить бота локально
+
+```bash
+# 1. Активировать venv
+source venv/bin/activate
+
+# 2. Создать .env
+cp steam_showcase_bot/.env.example steam_showcase_bot/.env
+# → вписать TELEGRAM_BOT_TOKEN
+
+# 3. Запустить
+python -m steam_showcase_bot.bot
+```
+
+---
+
+## Как тестировать изменения
+
+1. Запустить бота локально
+2. В Telegram отправить боту GIF-анимацию (Telegram сам конвертирует её в MP4)
+3. Бот должен ответить: «GIF сохранён: ...» → «Подготовлено: ...» → «Нарезка завершена...» → прислать ZIP
+4. Распаковать ZIP, проверить наличие `part1.gif`…`part5.gif`
+5. Каждый файл должен быть корректным GIF с шириной 150px
+
+Для проверки GIF-терминатора:
+```python
+with open('part1.gif', 'rb') as f:
+    f.seek(-1, 2)
+    print(hex(f.read(1)[0]))  # должно быть 0x21 (не 0x3b)
+```
+
+---
+
+## Полезные команды
+
+```bash
+# Проверить доступность ffmpeg
+ffmpeg -version
+ffprobe -version
+
+# Проверить размер видео
+ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of json video.mp4
+
+# Ручной ресайз до 750px
+ffmpeg -y -i input.mp4 -vf scale=750:-2 -c:v libx264 -crf 18 output.mp4
+
+# Ручная нарезка (первая часть)
+ffmpeg -y -i input.mp4 -vf "crop=150:ih:0:0" -c:v libx264 -crf 18 part1.mp4
+
+# Ручная конвертация в GIF
+ffmpeg -y -i part1.mp4 -vf "fps=12,scale=150:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer" part1.gif
+```
