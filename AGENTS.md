@@ -14,12 +14,26 @@
 
 ```
 steam_showcase_bot/
-├── bot.py           ← Telegram-хендлеры, точка входа (__main__)
-├── config.py        ← чтение переменных окружения через python-dotenv
-├── ffmpeg_utils.py  ← вся логика ffmpeg: resize, slice, gif, archive
-├── requirements.txt ← pip-зависимости
-├── .env             ← секреты (НЕ в git)
-└── .env.example     ← шаблон конфига
+├── __init__.py
+├── __main__.py              ← точка входа: python -m steam_showcase_bot
+├── bot.py                   ← создание Bot/Dispatcher, on_startup/on_shutdown, polling
+├── config.py                ← чтение переменных окружения через python-dotenv
+├── ffmpeg_utils.py          ← вся логика ffmpeg: resize, slice, gif, archive
+├── texts.py                 ← текстовые шаблоны, inline-клавиатура, прогресс-статус
+├── handlers/
+│   ├── __init__.py          ← регистрация роутеров: register_routers(dp)
+│   ├── commands.py          ← /start, /help (aiogram Router)
+│   ├── callbacks.py         ← inline-кнопки (aiogram Router)
+│   └── media.py             ← обработка медиафайлов (aiogram Router)
+├── services/
+│   ├── __init__.py
+│   └── processor.py         ← ProcessingService: resize → slice → gif → zip → отправка
+├── middlewares/
+│   ├── __init__.py
+│   └── throttling.py        ← ThrottlingMiddleware (rate limiting по пользователю)
+├── requirements.txt         ← pip-зависимости
+├── .env                     ← секреты (НЕ в git)
+└── .env.example             ← шаблон конфига
 ```
 
 Рабочие директории создаются автоматически при первом запуске:
@@ -33,24 +47,24 @@ steam_showcase_bot/
 
 ### Команды и хендлеры
 
-| Хендлер | Триггер | Описание |
-|---|---|---|
-| `cmd_start` | `/start` | Приветственное сообщение с inline-кнопками |
-| `cmd_help` | `/help` | Подробная справка |
-| `handle_callback` | Кнопки `help`, `about_showcase` | Ответ на нажатия inline-кнопок |
-| `handle_file` | Медиафайл (animation/video/document) | Скачивание + запуск обработки |
+| Хендлер | Файл | Триггер | Описание |
+|---|---|---|---|
+| `cmd_start` | `handlers/commands.py` | `/start` | Приветственное сообщение с inline-кнопками |
+| `cmd_help` | `handlers/commands.py` | `/help` | Подробная справка |
+| `handle_callback` | `handlers/callbacks.py` | Кнопки `help`, `about_showcase` | Ответ на нажатия inline-кнопок |
+| `handle_file` | `handlers/media.py` | Медиафайл (animation/video/document) | Проверка размера + скачивание + запуск обработки |
 
 ### Прогресс-сообщение (живое обновление)
 
 После получения файла бот создаёт **одно статус-сообщение** и редактирует его на каждом шаге — чат остаётся чистым.
 
-**Шаги (`_STEP_*` константы):**
+**Шаги (константы в `texts.py`):**
 ```python
-_STEP_SCALE = 1   # Масштабирование до 750px
-_STEP_SLICE = 2   # Нарезка на 5 частей
-_STEP_GIFS  = 3   # Создание GIF-файлов
-_STEP_ZIP   = 4   # Архивирование в ZIP
-_STEP_DONE  = 5   # Готово
+STEP_SCALE = 1   # Масштабирование до 750px
+STEP_SLICE = 2   # Нарезка на 5 частей
+STEP_GIFS  = 3   # Создание GIF-файлов
+STEP_ZIP   = 4   # Архивирование в ZIP
+STEP_DONE  = 5   # Готово
 ```
 
 **Визуальные состояния иконок:**
@@ -59,16 +73,16 @@ _STEP_DONE  = 5   # Готово
 - `✅` — завершено
 - `❌` — ошибка на этом шаге
 
-**Функции для управления статусом:**
-- `_status_text(filename, size_mb, step, failed_at, error_msg)` — строит HTML-текст статуса
-- `_edit_status(msg, **kwargs)` — тихо редактирует сообщение (игнорирует ошибки)
+**Функции для управления статусом (в `texts.py`):**
+- `status_text(filename, size_mb, step, failed_at, error_msg)` — строит HTML-текст статуса
+- `edit_status(msg, **kwargs)` — тихо редактирует сообщение (игнорирует ошибки)
 
 **Хронология обновлений:**
 ```
 ⬇️ Скачиваю файл…                     ← создаётся при старте скачивания
 📥 Файл получен: name.mp4 (X.X MB)    ← после скачивания, step=0
   ▫️ Масштабирование / ▫️ Нарезка / ...
-  ↓ (фоновая задача)
+  ↓ (фоновая задача через ProcessingService)
 🔄 Масштабирование  step=1
 ✅ Масштабирование
 🔄 Нарезка          step=2
@@ -79,23 +93,23 @@ _STEP_DONE  = 5   # Готово
 
 ### HTML-форматирование
 
-Все сообщения используют `parse_mode='HTML'`. Специальные символы в пользовательских данных (имена файлов, сообщения об ошибках) экранируются через `_esc()` (`html.escape()`).
+Все сообщения используют `parse_mode='HTML'`. Специальные символы в пользовательских данных (имена файлов, сообщения об ошибках) экранируются через `esc()` (`html.escape()`) из `texts.py`.
 
 ### Inline-клавиатура /start
 
 ```python
-_welcome_markup()  →  [📖 Справка]  [🎮 Что такое Витрина?]
+welcome_markup()  →  [📖 Справка]  [🎮 Что такое Витрина?]
 ```
-Callbacks: `'help'` → `_help_text()`, `'about_showcase'` → `_about_showcase_text()`
+Callbacks: `'help'` → `help_text()`, `'about_showcase'` → `about_showcase_text()`
 
-### Текстовые шаблоны
+### Текстовые шаблоны (в `texts.py`)
 
 | Функция | Содержимое |
 |---|---|
-| `_welcome_text(first_name)` | Приветствие + объяснение работы + призыв к действию |
-| `_help_text()` | Форматы, инструкция, команды, FAQ |
-| `_about_showcase_text()` | Объяснение устройства Витрины Steam |
-| `_status_text(...)` | Прогресс-статус обработки файла |
+| `welcome_text(first_name)` | Приветствие + объяснение работы + призыв к действию |
+| `help_text()` | Форматы, инструкция, команды, FAQ |
+| `about_showcase_text()` | Объяснение устройства Витрины Steam |
+| `status_text(...)` | Прогресс-статус обработки файла |
 
 ---
 
@@ -103,12 +117,25 @@ Callbacks: `'help'` → `_help_text()`, `'about_showcase'` → `_about_showcase_
 
 ### Поток обработки файла
 
-1. `bot.py → handle_file()` — скачивает файл в `gifs/`, запускает фоновую задачу через `asyncio.create_task()`
-2. `_maybe_start_prepare_task()` — проверяет ffmpeg, принимает только `.mp4`
+1. `handlers/media.py → handle_file()` — проверяет размер файла (`MAX_FILE_SIZE_MB`), скачивает в `gifs/`, создаёт `asyncio.create_task()`
+2. `services/processor.py → ProcessingService.process_file()` — захватывает семафор (`MAX_CONCURRENT_TASKS`), проверяет ffmpeg, принимает только `.mp4`
 3. `ffmpeg_utils.prepare_and_resize_copy()` — масштабирует до 750px → `prepared_gifs/`
 4. `ffmpeg_utils.slice_video_inplace_with_gifs()` — нарезает на 5 частей по 150px, создаёт GIF, архивирует в ZIP
-5. Бот отправляет ZIP пользователю с retry (до 3 попыток)
+5. `ProcessingService._send_archive()` — отправляет ZIP пользователю с retry (до `ZIP_SEND_RETRIES` попыток)
 6. Удаляет все промежуточные файлы
+
+### Rate limiting и ограничение параллелизма
+
+- **ThrottlingMiddleware** (`middlewares/throttling.py`) — подключена к media-роутеру, блокирует повторную отправку файла в течение `RATE_LIMIT_SECONDS` секунд от одного пользователя. Не блокирует `/start` и `/help`.
+- **asyncio.Semaphore** (`services/processor.py`) — ограничивает число параллельных задач ffmpeg до `MAX_CONCURRENT_TASKS`. Семафор создаётся в `on_startup` (внутри event loop).
+
+### Проверка размера файла
+
+В `handlers/media.py` перед вызовом `bot.download()` проверяется `file_size` у объектов `Animation`, `Video`, `Document` (Telegram API). Если `file_size > MAX_FILE_SIZE_MB` — файл не скачивается, пользователь получает уведомление.
+
+### aiohttp-сессия
+
+Сессия `aiohttp.ClientSession` создаётся в `on_startup()` внутри event loop через `AiohttpSession` (обёртка aiogram). Закрывается в `on_shutdown()`. Это гарантирует совместимость с Python 3.12+.
 
 ### ffmpeg-команды (важно понимать)
 
@@ -139,10 +166,6 @@ ffmpeg -y -i part.mp4 -vf "fps=12,scale=150:-1:flags=lanczos,split[s0][s1];[s0]p
 
 Для ffprobe аналогично: `FFPROBE_BIN` → `shutil.which('ffprobe')` → директория рядом с ffmpeg.
 
-### Известная проблема с aiohttp-сессией
-
-В `bot.py` `aiohttp.ClientSession` создаётся на уровне модуля (вне event loop). При импорте может появиться предупреждение `RuntimeError: no running event loop`. Бот при этом корректно продолжает работу, используя дефолтную сессию aiogram. **Это известная техническая задолженность** — в будущем сессию следует создавать внутри `async def _main()` или через `on_startup`-хук aiogram.
-
 ---
 
 ## Соглашения по разработке
@@ -154,10 +177,12 @@ ffmpeg -y -i part.mp4 -vf "fps=12,scale=150:-1:flags=lanczos,split[s0][s1];[s0]p
 ### Принципы внесения изменений
 
 1. **Не трогать `_fix_gif_terminator`** без явного тестирования результата в Steam
-2. **Все вызовы ffmpeg** должны идти через `ffmpeg_utils.py`, не в `bot.py` напрямую
+2. **Все вызовы ffmpeg** должны идти через `ffmpeg_utils.py`, не в хендлерах напрямую
 3. **Асинхронный контекст:** тяжёлые синхронные операции (ffmpeg) запускаются через `loop.run_in_executor(None, func, *args)`, не блокируя event loop
 4. **Очистка файлов:** промежуточные файлы ОБЯЗАТЕЛЬНО удаляются после успешной обработки. При ошибке — тоже пытаться почистить артефакты
 5. **Retry при отправке:** при `TelegramNetworkError` повторять до `ZIP_SEND_RETRIES` раз с экспоненциальной паузой (`2^attempt` сек)
+6. **Новые хендлеры** добавлять через aiogram Router в соответствующий файл `handlers/`, регистрировать в `handlers/__init__.py`
+7. **Бизнес-логику обработки** держать в `services/processor.py`, не в хендлерах
 
 ### Добавление новых зависимостей
 
@@ -167,7 +192,7 @@ ffmpeg -y -i part.mp4 -vf "fps=12,scale=150:-1:flags=lanczos,split[s0][s1];[s0]p
 
 ### Переменные окружения
 
-- Все новые конфигурационные параметры добавлять через `os.getenv()` в `bot.py` или в `config.py`
+- Все новые конфигурационные параметры добавлять в `config.py`
 - Если параметр критичный — добавить в `.env.example` с примером значения
 - Документировать в таблице «Конфигурация» в `README.md`
 
@@ -177,13 +202,11 @@ ffmpeg -y -i part.mp4 -vf "fps=12,scale=150:-1:flags=lanczos,split[s0][s1];[s0]p
 
 | # | Проблема | Приоритет |
 |---|---|---|
-| 1 | `aiohttp.ClientSession` создаётся вне event loop | Средний |
-| 2 | `MemoryStorage` для FSM — состояния теряются при перезапуске | Средний |
-| 3 | `moviepy` и `imageio-ffmpeg` в зависимостях, но не используются | Низкий |
-| 4 | Нет unit-тестов для `ffmpeg_utils.py` | Высокий |
-| 5 | Нет обработки случая, когда исходное видео шире 750px и нужен downscale | Средний |
-| 6 | Нет rate limiting — один пользователь может запустить много задач параллельно | Средний |
-| 7 | Логи смешаны (рус/англ) | Низкий |
+| 1 | `MemoryStorage` для FSM — состояния теряются при перезапуске | Средний |
+| 2 | `moviepy` и `imageio-ffmpeg` в зависимостях, но не используются | Низкий |
+| 3 | Нет unit-тестов для `ffmpeg_utils.py` | Высокий |
+| 4 | Нет обработки случая, когда исходное видео шире 750px и нужен downscale | Средний |
+| 5 | Логи смешаны (рус/англ) | Низкий |
 
 ---
 
@@ -198,7 +221,7 @@ cp steam_showcase_bot/.env.example steam_showcase_bot/.env
 # → вписать TELEGRAM_BOT_TOKEN
 
 # 3. Запустить
-python -m steam_showcase_bot.bot
+python -m steam_showcase_bot
 ```
 
 ---
@@ -207,7 +230,7 @@ python -m steam_showcase_bot.bot
 
 1. Запустить бота локально
 2. В Telegram отправить боту GIF-анимацию (Telegram сам конвертирует её в MP4)
-3. Бот должен ответить: «GIF сохранён: ...» → «Подготовлено: ...» → «Нарезка завершена...» → прислать ZIP
+3. Бот должен ответить: прогресс-сообщение → прислать ZIP
 4. Распаковать ZIP, проверить наличие `part1.gif`…`part5.gif`
 5. Каждый файл должен быть корректным GIF с шириной 150px
 

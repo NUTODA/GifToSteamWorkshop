@@ -53,14 +53,26 @@ GifToSteamWorkshop/
 ├── .dockerignore                    ← исключения из контекста сборки
 ├── steam_showcase_bot/              ← основной Python-пакет
 │   ├── __init__.py
-│   ├── bot.py                       ← точка входа, Telegram-хендлеры (aiogram 3.x)
+│   ├── __main__.py                  ← точка входа: python -m steam_showcase_bot
+│   ├── bot.py                       ← создание Bot/Dispatcher, startup/shutdown, polling
 │   ├── config.py                    ← загрузка переменных окружения
 │   ├── ffmpeg_utils.py              ← вся логика ffmpeg: resize, slice, gif
+│   ├── texts.py                     ← текстовые шаблоны и UI-хелперы
+│   ├── handlers/
+│   │   ├── __init__.py              ← регистрация роутеров
+│   │   ├── commands.py              ← /start, /help
+│   │   ├── callbacks.py             ← inline-кнопки
+│   │   └── media.py                 ← обработка медиафайлов
+│   ├── services/
+│   │   ├── __init__.py
+│   │   └── processor.py             ← resize → slice → gif → zip → отправка
+│   ├── middlewares/
+│   │   ├── __init__.py
+│   │   └── throttling.py            ← rate limiting по пользователю
 │   ├── requirements.txt             ← зависимости pip
 │   ├── .env                         ← секреты (не в git)
 │   ├── .env.example                 ← пример конфига
 │   ├── .gitignore
-│   ├── README.md                    ← краткая документация
 │   ├── gifs/                        ← оригинальные загрузки (создаётся автоматически)
 │   ├── prepared_gifs/               ← ресайзнутые копии (создаётся автоматически)
 │   └── sliced_gifs/                 ← нарезанные части + ZIP (создаётся автоматически)
@@ -131,7 +143,7 @@ FFPROBE_BIN=/path/to/ffprobe
 ### 6. Запустить бота
 
 ```bash
-python -m steam_showcase_bot.bot
+python -m steam_showcase_bot
 ```
 
 Бот запустится в режиме long polling. Остановка — `Ctrl+C`.
@@ -197,7 +209,10 @@ docker compose ps
 | `FFPROBE_BIN` | авто (PATH) | Путь к бинарнику `ffprobe` |
 | `TELEGRAM_CLIENT_TIMEOUT` | `300` | HTTP-таймаут aiohttp-клиента (сек) |
 | `TELEGRAM_CLIENT_CONNECT_LIMIT` | `0` | Лимит соединений aiohttp (0 = без ограничений) |
+| `MAX_FILE_SIZE_MB` | `20` | Максимальный размер входного файла (MB); проверяется до скачивания |
 | `MAX_ARCHIVE_SEND_MB` | `50` | Максимальный размер ZIP для отправки (MB); если больше — архив остаётся на диске |
+| `RATE_LIMIT_SECONDS` | `30` | Минимальный интервал между файлами от одного пользователя (сек) |
+| `MAX_CONCURRENT_TASKS` | `3` | Максимум параллельных задач ffmpeg |
 | `ZIP_SEND_RETRIES` | `3` | Количество попыток отправки ZIP при сетевой ошибке |
 | `ZIP_SEND_TIMEOUT` | `300` | Таймаут одной попытки отправки ZIP (сек) |
 | `BOT_DEBUG` | `0` | Включить отладочные хендлеры (`1` / `0`) |
@@ -211,9 +226,6 @@ docker compose ps
 | Python | 3.10+ | Основной язык |
 | [aiogram](https://docs.aiogram.dev/) | ≥ 3.0.0b7 | Асинхронный Telegram Bot API |
 | [python-dotenv](https://github.com/theskumar/python-dotenv) | ≥ 0.21.0 | Загрузка `.env` |
-| [Pillow](https://python-pillow.org/) | ≥ 9.0.0 | Работа с изображениями (опционально) |
-| [moviepy](https://zulko.github.io/moviepy/) | ≥ 1.0.3 | Видеообработка (импортируется опционально) |
-| [imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg) | ≥ 0.4.8 | Биндинги ffmpeg (опционально) |
 | ffmpeg / ffprobe | любая актуальная | Ресайз, нарезка, конвертация в GIF |
 
 ---
@@ -222,16 +234,27 @@ docker compose ps
 
 ### `bot.py`
 
-Точка входа. Регистрирует aiogram-хендлеры и запускает polling.
+Создание `Bot` и `Dispatcher`, lifecycle-хуки `on_startup`/`on_shutdown`, запуск polling. Сессия `aiohttp` создаётся в `on_startup` (внутри event loop).
 
-- `cmd_start` — отвечает на команду `/start`
-- `handle_file` — основной хендлер: скачивает медиафайл и запускает фоновую задачу `_maybe_start_prepare_task`
-- `_maybe_start_prepare_task` — фоновая корутина: проверяет ffmpeg, запускает resize → slice → zip → отправка пользователю
-- `_debug_inspect` / `_debug_raw` — хендлеры для отладки (активны при `LOG_LEVEL=DEBUG` или `BOT_DEBUG=1`)
+### `texts.py`
+
+Все текстовые шаблоны, inline-клавиатура, прогресс-статус обработки.
+
+### `handlers/`
+
+Aiogram-роутеры: `commands.py` (`/start`, `/help`), `callbacks.py` (inline-кнопки), `media.py` (приём медиафайлов с проверкой размера до скачивания).
+
+### `services/processor.py`
+
+Класс `ProcessingService` — полный цикл обработки файла (resize → slice → GIF → ZIP → отправка → cleanup) с `asyncio.Semaphore` для ограничения параллельных задач ffmpeg.
+
+### `middlewares/throttling.py`
+
+`ThrottlingMiddleware` — rate limiting по пользователю, подключается к медиа-роутеру.
 
 ### `ffmpeg_utils.py`
 
-Вся работа с ffmpeg вынесена сюда.
+Вся работа с ffmpeg:
 
 - `is_ffmpeg_available()` — проверяет наличие ffmpeg
 - `resize_mp4_to_width_750(input, output)` — масштабирует видео до 750px (H.264, CRF 18)
@@ -243,7 +266,7 @@ docker compose ps
 
 ### `config.py`
 
-Загружает переменные окружения через `python-dotenv`. Экспортирует константы, используемые в `bot.py`.
+Загружает переменные окружения через `python-dotenv`. Экспортирует все настройки: токены, лимиты, таймауты, rate limiting.
 
 ---
 
@@ -251,13 +274,9 @@ docker compose ps
 
 1. **Только MP4.** Telegram присылает GIF в формате MP4. Другие форматы (`.gif`, `.webm`) принимаются как документ, но при несовпадении `.mp4` расширения обработка пропускается.
 
-2. **aiohttp-сессия создаётся вне event loop.** В момент импорта модуля `bot.py` aiohttp пытается создать `ClientSession` вне запущенного event loop, что при некоторых версиях Python логирует `RuntimeError: no running event loop`. Бот продолжает работу с дефолтной сессией aiogram. Это известная нестандартность, требующая рефакторинга в будущем.
+2. **Большие архивы.** Если результирующий ZIP превышает `MAX_ARCHIVE_SEND_MB` (50 MB по умолчанию), файл остаётся на диске сервера и пользователь получает уведомление.
 
-3. **Большие архивы.** Если результирующий ZIP превышает `MAX_ARCHIVE_SEND_MB` (50 MB по умолчанию), файл остаётся на диске сервера и пользователь получает уведомление.
-
-4. **Хранилище состояний.** Используется `MemoryStorage` — состояния FSM теряются при перезапуске бота. Для production рекомендуется `RedisStorage`.
-
-5. **`moviepy` и `imageio-ffmpeg`** — зависимости в `requirements.txt`, но фактически не используются в основном потоке обработки. Вся работа идёт напрямую через subprocess-вызовы `ffmpeg`.
+3. **Хранилище состояний.** Используется `MemoryStorage` — состояния FSM теряются при перезапуске бота. Для production рекомендуется `RedisStorage`.
 
 ---
 

@@ -11,4 +11,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY steam_showcase_bot/ ./steam_showcase_bot/
 
-CMD ["python", "-m", "steam_showcase_bot.bot"]
+CMD ["python", "-m", "steam_showcase_bot"]
