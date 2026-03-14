@@ -16,11 +16,7 @@ downloads/
 .installed.cfg
 pip-wheel-metadata/
 
-# Virtual environments (уже есть в корне проекта)
-# venv/ - удалить эту строку
-# .venv/ - удалить
-# env/ - удалить  
-# ENV/ - удалить
+# Virtual environments
 env.bak/
 venv.bak/
 
@@ -89,7 +85,9 @@ credentials
 # *.cfg - удалить, если используются
 
 # Logs
-steam_showcase_bot.log  # добавить конкретный файл
+# Лог может создаваться и в пакете, и в корне репозитория
+steam_showcase_bot.log
+../steam_showcase_bot.log
 *.log
 logs/
 *.log.*
