@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -11,11 +12,14 @@ from .config import (
     LOG_LEVEL, LOG_FILE, LOG_TO_FILE,
     TELEGRAM_CLIENT_TIMEOUT, TELEGRAM_CLIENT_CONNECT_LIMIT,
     RATE_LIMIT_SECONDS, MAX_CONCURRENT_TASKS, DEBUG_MODE,
+    SHUTDOWN_TASK_WAIT_TIMEOUT, FFMPEG_TERMINATE_TIMEOUT,
+    HEARTBEAT_FILE, HEARTBEAT_INTERVAL_SECONDS,
 )
 from .handlers import register_routers
 from .handlers.media import router as media_router
 from .middlewares.throttling import ThrottlingMiddleware
 from .services.processor import ProcessingService
+from .ffmpeg_utils import terminate_running_ffmpeg_processes
 
 logger = logging.getLogger('steam_showcase_bot')
 numeric_level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
@@ -42,6 +46,19 @@ dp = Dispatcher(storage=MemoryStorage())
 _custom_session: AiohttpSession | None = None
 
 
+async def _heartbeat_writer(stop_event: asyncio.Event) -> None:
+    """Периодически обновляет heartbeat-файл для Docker healthcheck."""
+    heartbeat_path = Path(HEARTBEAT_FILE)
+    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+
+    while not stop_event.is_set():
+        heartbeat_path.write_text(str(int(asyncio.get_running_loop().time())), encoding='utf-8')
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
+        except asyncio.TimeoutError:
+            continue
+
+
 async def on_startup() -> None:
     """Создаёт aiohttp-сессию и семафор внутри event loop."""
     global _custom_session
@@ -64,12 +81,43 @@ async def on_startup() -> None:
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
     processor = ProcessingService(bot=bot, semaphore=semaphore)
     dp['processor'] = processor
+    dp['is_stopping'] = False
+    dp['active_processing_tasks'] = set()
+    stop_event = asyncio.Event()
+    dp['heartbeat_stop_event'] = stop_event
+    dp['heartbeat_task'] = asyncio.create_task(_heartbeat_writer(stop_event))
     logger.info('ProcessingService ready (max_concurrent=%d)', MAX_CONCURRENT_TASKS)
 
 
 async def on_shutdown() -> None:
-    """Закрывает aiohttp-сессию, если мы её создавали."""
+    """Корректно останавливает фоновые задачи и закрывает сессию."""
     global _custom_session
+    dp['is_stopping'] = True
+
+    active_tasks = dp.workflow_data.get('active_processing_tasks')
+    if isinstance(active_tasks, set) and active_tasks:
+        logger.info('Waiting for %d active processing tasks', len(active_tasks))
+        done, pending = await asyncio.wait(active_tasks, timeout=SHUTDOWN_TASK_WAIT_TIMEOUT)
+        if pending:
+            logger.warning('Cancelling %d hanging processing tasks', len(pending))
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        logger.info('Processing tasks completed: %d, cancelled: %d', len(done), len(pending))
+
+    terminated, killed = terminate_running_ffmpeg_processes(FFMPEG_TERMINATE_TIMEOUT)
+    if terminated:
+        logger.info('Stopped ffmpeg processes: terminated=%d, killed=%d', terminated, killed)
+
+    heartbeat_stop_event = dp.workflow_data.get('heartbeat_stop_event')
+    heartbeat_task = dp.workflow_data.get('heartbeat_task')
+    if isinstance(heartbeat_stop_event, asyncio.Event):
+        heartbeat_stop_event.set()
+    if isinstance(heartbeat_task, asyncio.Task):
+        try:
+            await heartbeat_task
+        except Exception:
+            logger.exception('Error while stopping heartbeat task')
 
     if _custom_session is not None:
         try:

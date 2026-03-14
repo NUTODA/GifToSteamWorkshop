@@ -4,15 +4,105 @@ from pathlib import Path
 import logging
 import shutil
 import json
+import threading
+import time
 
 logger = logging.getLogger('steam_showcase_bot.ffmpeg_utils')
 
 # detect ffmpeg binary: prefer FFMPEG_BIN env var, fallback to PATH lookup
 FFMPEG_BIN = os.environ.get('FFMPEG_BIN') or shutil.which('ffmpeg')
 
+_running_ffmpeg_processes: set[subprocess.Popen] = set()
+_ffmpeg_processes_lock = threading.Lock()
+
 def is_ffmpeg_available() -> bool:
     """Return True if an ffmpeg executable is available (or FFMPEG_BIN set)."""
     return bool(FFMPEG_BIN)
+
+
+def _track_ffmpeg_process(proc: subprocess.Popen) -> None:
+    with _ffmpeg_processes_lock:
+        _running_ffmpeg_processes.add(proc)
+
+
+def _untrack_ffmpeg_process(proc: subprocess.Popen) -> None:
+    with _ffmpeg_processes_lock:
+        _running_ffmpeg_processes.discard(proc)
+
+
+def _run_ffmpeg_command(cmd: list[str], capture_output: bool = False) -> tuple[str, str] | None:
+    """Запускает ffmpeg-команду с трекингом процесса для graceful shutdown."""
+    stdout_pipe = subprocess.PIPE if capture_output else None
+    stderr_pipe = subprocess.PIPE if capture_output else None
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=stdout_pipe,
+            stderr=stderr_pipe,
+            text=True,
+        )
+    except FileNotFoundError as e:
+        logger.error('ffmpeg executable not found: %s', e)
+        raise RuntimeError(
+            'ffmpeg executable not found: убедитесь, что ffmpeg доступен в PATH '
+            'или задайте FFMPEG_BIN.'
+        ) from e
+
+    _track_ffmpeg_process(proc)
+    try:
+        out, err = proc.communicate()
+    finally:
+        _untrack_ffmpeg_process(proc)
+
+    if proc.returncode != 0:
+        error_text = err if err else f'код возврата {proc.returncode}'
+        logger.error('ffmpeg failed: %s', error_text)
+        raise RuntimeError(f'ffmpeg error:\n{error_text}')
+
+    if capture_output:
+        return out, err
+    return None
+
+
+def terminate_running_ffmpeg_processes(grace_timeout: float = 5.0) -> tuple[int, int]:
+    """Мягко завершает активные ffmpeg-процессы, затем принудительно убивает зависшие.
+
+    Возвращает кортеж (terminated_count, killed_count).
+    """
+    with _ffmpeg_processes_lock:
+        processes = [proc for proc in _running_ffmpeg_processes if proc.poll() is None]
+
+    if not processes:
+        return 0, 0
+
+    for proc in processes:
+        try:
+            proc.terminate()
+        except Exception:
+            logger.exception('Не удалось отправить terminate для ffmpeg pid=%s', getattr(proc, 'pid', None))
+
+    deadline = time.monotonic() + max(0.0, grace_timeout)
+    killed_count = 0
+
+    for proc in processes:
+        remaining = deadline - time.monotonic()
+        timeout = remaining if remaining > 0 else 0
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+                killed_count += 1
+            except Exception:
+                logger.exception('Не удалось принудительно завершить ffmpeg pid=%s', getattr(proc, 'pid', None))
+        except Exception:
+            logger.exception('Ошибка при ожидании завершения ffmpeg pid=%s', getattr(proc, 'pid', None))
+        finally:
+            _untrack_ffmpeg_process(proc)
+
+    terminated_count = len(processes)
+    return terminated_count, killed_count
 
 
 def resize_mp4_to_width_750(input_path: Path, output_path: Path) -> None:
@@ -45,15 +135,7 @@ def resize_mp4_to_width_750(input_path: Path, output_path: Path) -> None:
     cmd.append(output_str)
 
     logger.debug('Running ffmpeg command: %s', ' '.join(cmd))
-    try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    except FileNotFoundError as e:
-        logger.error('ffmpeg executable not found: %s', e)
-        raise RuntimeError("ffmpeg executable not found: убедитесь, что ffmpeg доступен в PATH или задайте FFMPEG_BIN.") from e
-
-    if result.returncode != 0:
-        logger.error('ffmpeg failed: %s', result.stderr)
-        raise RuntimeError(f"ffmpeg error:\n{result.stderr}")
+    _run_ffmpeg_command(cmd, capture_output=True)
 
 
 def prepare_and_resize_copy(src_path: Path, prepared_dir: Path) -> Path:
@@ -138,11 +220,7 @@ def make_gif_from_video(input_path: Path, output_gif: Path, fps: int = 12, scale
         str(output_gif)
     ]
     logger.debug('Running ffmpeg for GIF: %s', ' '.join(cmd))
-    try:
-        subprocess.check_call(cmd)
-    except subprocess.CalledProcessError as e:
-        logger.error('ffmpeg GIF creation failed: %s', e)
-        raise
+    _run_ffmpeg_command(cmd)
 
     # После создания GIF проверяем последний байт и при необходимости заменяем 0x3B на 0x21
     try:
@@ -211,7 +289,7 @@ def slice_video_inplace_with_gifs(path: str | Path):
             str(out)
         ]
         logger.debug('Running ffmpeg for slice: %s', ' '.join(cmd))
-        subprocess.check_call(cmd)
+        _run_ffmpeg_command(cmd)
         part_paths.append(out)
 
     # Перезаписываем исходник первой частью

@@ -181,6 +181,11 @@ docker compose up -d --build
 docker compose ps
 ```
 
+Контейнер `bot` использует встроенный Docker healthcheck:
+- команда проверки: `python -m steam_showcase_bot.healthcheck`
+- `healthy` — heartbeat-файл обновляется вовремя и `ffmpeg` доступен
+- `unhealthy` — бот завис или `ffmpeg` недоступен
+
 ### Что хранится в Docker volumes
 
 | Volume | Путь в контейнере | Содержимое |
@@ -215,6 +220,11 @@ docker compose ps
 | `MAX_CONCURRENT_TASKS` | `3` | Максимум параллельных задач ffmpeg |
 | `ZIP_SEND_RETRIES` | `3` | Количество попыток отправки ZIP при сетевой ошибке |
 | `ZIP_SEND_TIMEOUT` | `300` | Таймаут одной попытки отправки ZIP (сек) |
+| `SHUTDOWN_TASK_WAIT_TIMEOUT` | `30` | Сколько ждать активные задачи при shutdown перед принудительной отменой (сек) |
+| `FFMPEG_TERMINATE_TIMEOUT` | `5` | Сколько ждать остановки ffmpeg после `terminate` перед `kill` (сек) |
+| `HEARTBEAT_FILE` | `/tmp/steam_showcase_bot.heartbeat` | Файл heartbeat для Docker healthcheck |
+| `HEARTBEAT_INTERVAL_SECONDS` | `5` | Интервал обновления heartbeat-файла (сек) |
+| `HEALTHCHECK_MAX_STALENESS_SECONDS` | `20` | Максимально допустимый «возраст» heartbeat для статуса healthy (сек) |
 | `BOT_DEBUG` | `0` | Включить отладочные хендлеры (`1` / `0`) |
 
 ---

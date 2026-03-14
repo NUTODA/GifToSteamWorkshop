@@ -2,6 +2,12 @@ services:
   bot:
     build: .
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-m", "steam_showcase_bot.healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     env_file:
       - steam_showcase_bot/.env
     volumes:

@@ -3,7 +3,7 @@ import datetime
 import logging
 from pathlib import Path
 
-from aiogram import Bot, Router, types, F
+from aiogram import Bot, Router, Dispatcher, types
 
 from ..config import MAX_FILE_SIZE_MB
 from ..texts import esc, edit_status
@@ -39,7 +39,7 @@ def _check_file_size(file_obj) -> tuple[bool, float | None]:
 
 
 @router.message(_is_media)
-async def handle_file(message: types.Message, bot: Bot, processor: ProcessingService):
+async def handle_file(message: types.Message, bot: Bot, processor: ProcessingService, dispatcher: Dispatcher):
     """Скачивает GIF/видео, создаёт прогресс-сообщение и запускает обработку."""
     gifs_dir = Path(__file__).resolve().parent.parent / 'gifs'
     gifs_dir.mkdir(exist_ok=True)
@@ -57,6 +57,14 @@ async def handle_file(message: types.Message, bot: Bot, processor: ProcessingSer
     )
 
     async def _download_and_process(file_obj, fname: str):
+        if dispatcher.workflow_data.get('is_stopping'):
+            await message.answer(
+                '⏳ <b>Бот завершает работу</b>\n\n'
+                'Сейчас новые файлы не принимаются. Повтори отправку через минуту.',
+                parse_mode='HTML',
+            )
+            return
+
         ok, size_mb = _check_file_size(file_obj)
         if not ok:
             await message.answer(
@@ -75,7 +83,11 @@ async def handle_file(message: types.Message, bot: Bot, processor: ProcessingSer
 
         _sz = dest.stat().st_size / (1024 * 1024) if dest.exists() else None
         await edit_status(status_msg, filename=fname, size_mb=_sz, step=0)
-        asyncio.create_task(processor.process_file(dest, fname, message, status_msg))
+        task = asyncio.create_task(processor.process_file(dest, fname, message, status_msg))
+        active_tasks = dispatcher.workflow_data.get('active_processing_tasks')
+        if isinstance(active_tasks, set):
+            active_tasks.add(task)
+            task.add_done_callback(active_tasks.discard)
 
     try:
         if anim:
