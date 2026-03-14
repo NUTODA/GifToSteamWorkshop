@@ -1,14 +1,16 @@
 import os
 import asyncio
+import html as _html_module
 from pathlib import Path
 import logging
 import shutil
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramNetworkError
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from .config import TELEGRAM_BOT_TOKEN as TOKEN, LOG_LEVEL, LOG_FILE, LOG_TO_FILE, SAVE_UPLOADS
 
 # configure logging early so logs are available during import-time checks
@@ -46,25 +48,572 @@ except Exception:
 if not TOKEN:
     logger.warning('Please set TELEGRAM_BOT_TOKEN in .env or environment')
 
-# Configure aiohttp settings (do NOT create ClientSession at import time — it requires a running event loop)
-TELEGRAM_CLIENT_TIMEOUT = int(os.getenv('TELEGRAM_CLIENT_TIMEOUT', '600'))  # seconds (increased default to help large uploads)
-TELEGRAM_CLIENT_CONNECT_LIMIT = int(os.getenv('TELEGRAM_CLIENT_CONNECT_LIMIT', '0'))  # 0 == no limit
-# session will be created lazily at runtime (inside async startup) to avoid "no running event loop" errors
+TELEGRAM_CLIENT_TIMEOUT = int(os.getenv('TELEGRAM_CLIENT_TIMEOUT', '300'))
+TELEGRAM_CLIENT_CONNECT_LIMIT = int(os.getenv('TELEGRAM_CLIENT_CONNECT_LIMIT', '0'))
 session = None
-bot = Bot(token=TOKEN) if TOKEN else None
-# store aiohttp creation parameters for use in the async startup
-_aiohttp_settings = {
-    'timeout_seconds': TELEGRAM_CLIENT_TIMEOUT,
-    'connect_limit': TELEGRAM_CLIENT_CONNECT_LIMIT,
-}
-
-# If TOKEN is not set, bot is None and rest of the code will behave accordingly.
+bot = None
+if TOKEN:
+    try:
+        import aiohttp
+        timeout = aiohttp.ClientTimeout(total=TELEGRAM_CLIENT_TIMEOUT)
+        connector = aiohttp.TCPConnector(limit=TELEGRAM_CLIENT_CONNECT_LIMIT)
+        session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+        bot = Bot(token=TOKEN, session=session)
+    except Exception:
+        logger.exception('Failed to create aiohttp session for Bot; falling back to default')
+        bot = Bot(token=TOKEN)
+else:
+    bot = None
 dp = Dispatcher(storage=MemoryStorage())
 DEBUG_MODE = (LOG_LEVEL or '').upper() == 'DEBUG' or os.getenv('BOT_DEBUG', '') == '1'
-# Max archive size (MB) that the bot will attempt to send to the user. If the archive is
-# larger, it will be left on disk and the user will be informed.
 MAX_ARCHIVE_SEND_MB = int(os.getenv('MAX_ARCHIVE_SEND_MB', '50'))
 
+
+# ─── Прогресс-шаги обработки ─────────────────────────────────────────────────
+
+_STEP_SCALE   = 1   # масштабирование до 750px
+_STEP_SLICE   = 2   # нарезка на части
+_STEP_GIFS    = 3   # конвертация в GIF
+_STEP_ZIP     = 4   # архивирование
+_STEP_DONE    = 5   # всё готово
+
+
+# ─── UI-хелперы ───────────────────────────────────────────────────────────────
+
+def _esc(text: str) -> str:
+    """Экранирует HTML-символы для Telegram HTML parse_mode."""
+    return _html_module.escape(str(text))
+
+
+def _welcome_markup() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text='📖 Справка', callback_data='help')
+    builder.button(text='🎮 Что такое Витрина?', callback_data='about_showcase')
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def _welcome_text(first_name: str) -> str:
+    return (
+        f'🎬 <b>Steam Showcase Bot</b>\n\n'
+        f'Привет, {_esc(first_name)}! 👋\n\n'
+        f'Я автоматически подготовлю твою анимацию для <b>Витрины Steam</b>.\n\n'
+        f'<b>📌 Как это работает:</b>\n'
+        f'Витрина отображает GIF через 5 горизонтальных слотов по <code>150 px</code>. Я:\n\n'
+        f'1️⃣  Масштабирую видео до <code>750 px</code>\n'
+        f'2️⃣  Нарезаю на <b>5 частей</b> по <code>150 px</code>\n'
+        f'3️⃣  Конвертирую каждую часть в <code>.gif</code>\n'
+        f'4️⃣  Упаковываю всё в <b>ZIP-архив</b>\n\n'
+        f'🚀 <b>Просто отправь GIF или MP4-видео — остальное сделаю я!</b>'
+    )
+
+
+def _help_text() -> str:
+    limit_mb = os.getenv('MAX_ARCHIVE_SEND_MB', '50')
+    return (
+        f'❓ <b>Справка — Steam Showcase Bot</b>\n\n'
+        f'<b>Поддерживаемые форматы:</b>\n'
+        f'• GIF-анимация (Telegram конвертирует её в MP4 автоматически)\n'
+        f'• MP4-видео\n'
+        f'• Файлы <code>.gif</code>, <code>.mp4</code>, <code>.webm</code> как документ\n\n'
+        f'<b>Как использовать:</b>\n'
+        f'1. Отправь GIF или видео прямо в этот чат\n'
+        f'2. Дождись обработки (обычно 10–60 сек)\n'
+        f'3. Получи ZIP с 5 готовыми GIF-файлами\n'
+        f'4. Загрузи <code>part1.gif</code>…<code>part5.gif</code>\n'
+        f'   в слоты Витрины на странице своего профиля Steam\n\n'
+        f'<b>Команды:</b>\n'
+        f'/start — главное меню\n'
+        f'/help — эта справка\n\n'
+        f'<b>⚠️ Частые вопросы:</b>\n'
+        f'• <i>«Неподдерживаемый формат»</i> — отправь файл как GIF-анимацию, '
+        f'а не как документ\n'
+        f'• <i>«Архив слишком большой»</i> — файл создан на сервере, но превысил '
+        f'лимит отправки {_esc(limit_mb)} MB\n'
+        f'• <i>«FFmpeg не найден»</i> — обратитесь к администратору сервера'
+    )
+
+
+def _about_showcase_text() -> str:
+    return (
+        f'🎮 <b>Витрина Steam (Steam Showcase)</b>\n\n'
+        f'Витрина — раздел профиля Steam, где можно разместить анимированные GIF-картинки. '
+        f'Она состоит из <b>5 горизонтальных слотов</b>, каждый шириной <code>150 px</code>.\n\n'
+        f'Чтобы анимация выглядела как единое целое, нужно:\n'
+        f'1. Взять видео шириной <code>750 px</code> (5 × 150 px)\n'
+        f'2. Разрезать на 5 равных частей\n'
+        f'3. Загрузить каждую часть в соответствующий слот\n\n'
+        f'<b>Именно это я делаю автоматически!</b> 🎉\n\n'
+        f'Управление Витриной:\n'
+        f'<code>steamcommunity.com → Профиль → Редактировать → Витрина</code>'
+    )
+
+
+def _status_text(
+    filename: str,
+    size_mb: float | None = None,
+    step: int = 0,
+    failed_at: int | None = None,
+    error_msg: str | None = None,
+) -> str:
+    """Формирует HTML-текст прогресс-статуса обработки файла."""
+    size_str = f' <i>({size_mb:.1f} MB)</i>' if size_mb is not None else ''
+
+    step_defs = [
+        (_STEP_SCALE, 'Масштабирование до <code>750 px</code>'),
+        (_STEP_SLICE, 'Нарезка на 5 частей'),
+        (_STEP_GIFS,  'Создание GIF-файлов'),
+        (_STEP_ZIP,   'Архивирование в ZIP'),
+    ]
+
+    rows = []
+    for s, label in step_defs:
+        if failed_at == s:
+            icon = '❌'
+        elif s < step or step >= _STEP_DONE:
+            icon = '✅'
+        elif s == step:
+            icon = '🔄'
+        else:
+            icon = '▫️'
+        rows.append(f'{icon} {label}')
+    steps_block = '\n'.join(rows)
+
+    if failed_at is not None:
+        err_detail = f'\n<i>{_esc(str(error_msg)[:200])}</i>' if error_msg else ''
+        header = f'❌ <b>Ошибка при обработке</b>{err_detail}'
+    elif step >= _STEP_DONE:
+        header = '✅ <b>Готово! Отправляю архив…</b>'
+    elif step == 0:
+        header = '⏳ <b>Начинаю обработку…</b>'
+    else:
+        header = '⏳ <b>Идёт обработка…</b>'
+
+    return (
+        f'📥 <b>Файл получен:</b> <code>{_esc(filename)}</code>{size_str}\n\n'
+        f'{header}\n\n'
+        f'{steps_block}'
+    )
+
+
+async def _edit_status(msg: types.Message | None, **kwargs) -> None:
+    """Тихо редактирует статус-сообщение, игнорируя ошибки."""
+    if msg is None:
+        return
+    try:
+        await msg.edit_text(_status_text(**kwargs), parse_mode='HTML')
+    except Exception:
+        pass
+
+
+# ─── Хендлеры команд ─────────────────────────────────────────────────────────
+
+async def cmd_start(message: types.Message):
+    logger.info('cmd_start: from=%s', getattr(getattr(message, 'from_user', None), 'id', None))
+    first_name = getattr(getattr(message, 'from_user', None), 'first_name', None) or 'друг'
+    await message.answer(
+        _welcome_text(first_name),
+        parse_mode='HTML',
+        reply_markup=_welcome_markup(),
+    )
+
+
+async def cmd_help(message: types.Message):
+    logger.info('cmd_help: from=%s', getattr(getattr(message, 'from_user', None), 'id', None))
+    await message.answer(_help_text(), parse_mode='HTML')
+
+
+async def handle_callback(callback: types.CallbackQuery):
+    """Обрабатывает нажатия на инлайн-кнопки."""
+    data = callback.data
+    try:
+        if data == 'help':
+            await callback.message.answer(_help_text(), parse_mode='HTML')
+        elif data == 'about_showcase':
+            await callback.message.answer(_about_showcase_text(), parse_mode='HTML')
+        await callback.answer()
+    except Exception:
+        logger.exception('handle_callback error: data=%s', data)
+        try:
+            await callback.answer('Ошибка при обработке кнопки.')
+        except Exception:
+            pass
+
+
+# ─── Сохранение файла ────────────────────────────────────────────────────────
+
+def _save_to_gifs(src_path: Path, message: types.Message, gifs_dir: Path, orig_name: str | None = None) -> Path:
+    """Copy the uploaded gif (src_path) into gifs_dir with a unique name and return the dest path."""
+    try:
+        gifs_dir.mkdir(exist_ok=True)
+    except Exception:
+        pass
+    import datetime
+    user_id = getattr(message.from_user, 'id', 'unknown')
+    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    name = orig_name or src_path.name
+    if not Path(name).suffix:
+        name = f'{name}.gif'
+    dest = gifs_dir / f'{user_id}_{ts}_{name}'
+    try:
+        shutil.copy2(src_path, dest)
+        logger.info('Saved uploaded GIF to %s', dest)
+        return dest
+    except Exception:
+        logger.exception('Ошибка при сохранении gif')
+        return dest
+
+
+# ─── Основной хендлер медиафайлов ────────────────────────────────────────────
+
+async def handle_file(message: types.Message):
+    """Скачивает GIF/видео, создаёт прогресс-сообщение и запускает обработку."""
+    import datetime
+
+    gifs_dir = Path(__file__).parent / 'gifs'
+    gifs_dir.mkdir(exist_ok=True)
+
+    user_id = getattr(message.from_user, 'id', 'unknown')
+    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    anim = getattr(message, 'animation', None)
+    doc  = message.document
+    vid  = getattr(message, 'video', None)
+
+    anim_name  = getattr(anim, 'file_name', None)  if anim else None
+    doc_name   = getattr(doc,  'file_name', None)  if doc  else None
+    doc_mime   = getattr(doc,  'mime_type', None)  if doc  else None
+    video_name = getattr(vid,  'file_name', None)  if vid  else None
+
+    logger.info(
+        'handle_file: msg_id=%s from=%s anim=%s doc=%s video=%s anim_name=%s doc_name=%s doc_mime=%s',
+        message.message_id, user_id,
+        bool(anim), bool(doc), bool(vid),
+        anim_name, doc_name, doc_mime,
+    )
+
+    async def download_file(file_obj, dest_path: Path):
+        file_id = file_obj.file_id
+        logger.debug('Downloading file_id=%s to %s', file_id, dest_path)
+        await bot.download(file_id, destination=dest_path)
+        logger.info('Downloaded to %s (%d bytes)', dest_path, dest_path.stat().st_size)
+        return dest_path
+
+    async def _maybe_start_prepare_task(src_path: Path, visible_name: str, status_msg: types.Message | None = None):
+        """Фоновая задача: resize → slice → GIF → ZIP → отправка."""
+        _sz: float | None = None
+        try:
+            _sz = src_path.stat().st_size / (1024 * 1024)
+        except Exception:
+            pass
+
+        async def _upd(step: int, failed_at: int | None = None, error_msg: str | None = None):
+            await _edit_status(status_msg, filename=visible_name, size_mb=_sz,
+                               step=step, failed_at=failed_at, error_msg=error_msg)
+
+        if not FFMPEG_UTILS_AVAILABLE:
+            logger.debug('FFmpeg utils not available; skipping prepare task')
+            return
+
+        try:
+            if not is_ffmpeg_available():
+                logger.warning('ffmpeg executable not found; skipping prepare task')
+                await _upd(0, failed_at=_STEP_SCALE, error_msg='FFmpeg не найден на сервере')
+                try:
+                    if src_path.exists():
+                        src_path.unlink()
+                        logger.info('Removed upload %s because ffmpeg is unavailable', src_path)
+                except Exception:
+                    logger.exception('Failed to remove upload %s when ffmpeg missing', src_path)
+                try:
+                    await message.answer(
+                        '⚠️ <b>FFmpeg не найден</b>\n\n'
+                        'Обработка невозможна. Попросите администратора установить '
+                        '<code>ffmpeg</code> и добавить его в PATH или задать '
+                        'переменную окружения <code>FFMPEG_BIN</code>.',
+                        parse_mode='HTML',
+                    )
+                except Exception:
+                    pass
+                return
+        except Exception:
+            logger.exception('Error checking ffmpeg availability')
+            try:
+                if src_path.exists():
+                    src_path.unlink()
+            except Exception:
+                pass
+            return
+
+        if src_path.suffix.lower() != '.mp4':
+            logger.debug('Source not mp4, skipping prepare task: %s', src_path)
+            await _upd(0, failed_at=_STEP_SCALE, error_msg='Неподдерживаемый формат файла')
+            try:
+                if src_path.exists():
+                    src_path.unlink()
+                    logger.info('Removed non-mp4 upload %s', src_path)
+            except Exception:
+                logger.exception('Failed to remove non-mp4 upload %s', src_path)
+            try:
+                await message.answer(
+                    '⚠️ <b>Неподдерживаемый формат</b>\n\n'
+                    f'Получен файл <code>{_esc(visible_name)}</code>.\n\n'
+                    'Бот принимает только <b>MP4-файлы</b>. Telegram автоматически '
+                    'конвертирует GIF-анимации в MP4 — попробуй отправить файл '
+                    'как GIF-анимацию, а не как документ.',
+                    parse_mode='HTML',
+                )
+            except Exception:
+                pass
+            return
+
+        prepared_dir = Path(__file__).parent / 'prepared_gifs'
+        loop = asyncio.get_running_loop()
+
+        try:
+            assert prepare_and_resize_copy is not None
+            await _upd(_STEP_SCALE)
+            prepared = await loop.run_in_executor(None, prepare_and_resize_copy, src_path, prepared_dir)
+
+            sliced_dir = Path(__file__).parent / 'sliced_gifs'
+            sliced_dir.mkdir(exist_ok=True)
+            sliced_copy = sliced_dir / prepared.name
+            shutil.copy2(prepared, sliced_copy)
+            logger.info('Copied prepared file to %s for slicing', sliced_copy)
+
+            if slice_video_inplace_with_gifs:
+                await _upd(_STEP_SLICE)
+                try:
+                    archive_path = await loop.run_in_executor(None, slice_video_inplace_with_gifs, sliced_copy)
+                except Exception as e:
+                    logger.exception('Ошибка при нарезке файла %s', sliced_copy)
+                    await _upd(0, failed_at=_STEP_GIFS, error_msg=str(e))
+                    for path in (sliced_copy, prepared, src_path):
+                        try:
+                            if path.exists():
+                                path.unlink()
+                                logger.info('Removed %s after failed slicing', path)
+                        except Exception:
+                            logger.exception('Failed to remove %s', path)
+                    try:
+                        for f in sliced_dir.glob(f'{sliced_copy.stem}*'):
+                            try:
+                                if f.is_dir():
+                                    shutil.rmtree(f)
+                                else:
+                                    f.unlink()
+                                logger.info('Removed artifact %s', f)
+                            except Exception:
+                                logger.exception('Failed to remove artifact %s', f)
+                    except Exception:
+                        logger.exception('Error while cleaning artifacts in %s', sliced_dir)
+                    try:
+                        await message.answer(
+                            f'❌ <b>Ошибка при создании GIF:</b>\n'
+                            f'<code>{_esc(str(e)[:300])}</code>',
+                            parse_mode='HTML',
+                        )
+                    except Exception:
+                        pass
+                    return
+
+                # Удаляем промежуточные файлы после успешной обработки
+                for path in (src_path, prepared):
+                    try:
+                        if path.exists():
+                            path.unlink()
+                            logger.info('Removed intermediate file %s', path)
+                    except Exception:
+                        logger.exception('Failed to remove %s', path)
+
+                try:
+                    removed = []
+                    for mp4 in sliced_dir.glob(f'{sliced_copy.stem}*.mp4'):
+                        try:
+                            mp4.unlink()
+                            removed.append(mp4.name)
+                        except Exception:
+                            logger.exception('Failed to remove intermediate mp4 %s', mp4)
+                    if removed:
+                        logger.info('Removed intermediate mp4 files: %s', ', '.join(removed))
+                except Exception:
+                    logger.exception('Error while cleaning .mp4 files in %s', sliced_dir)
+
+                # Отправляем архив пользователю
+                await _upd(_STEP_DONE)
+                try:
+                    if archive_path:
+                        archive = Path(archive_path)
+                        if archive.exists():
+                            size_mb = archive.stat().st_size / (1024 * 1024)
+                            if size_mb > MAX_ARCHIVE_SEND_MB:
+                                logger.warning(
+                                    'Archive %s is too large (%.1f MB), limit %d MB',
+                                    archive, size_mb, MAX_ARCHIVE_SEND_MB,
+                                )
+                                try:
+                                    await message.answer(
+                                        f'📦 <b>Архив готов, но слишком большой для отправки</b>\n\n'
+                                        f'Размер: <code>{size_mb:.1f} MB</code> '
+                                        f'(лимит: <code>{MAX_ARCHIVE_SEND_MB} MB</code>)\n\n'
+                                        f'Архив сохранён на сервере и доступен администратору.',
+                                        parse_mode='HTML',
+                                    )
+                                except Exception:
+                                    pass
+                            else:
+                                send_attempts = int(os.getenv('ZIP_SEND_RETRIES', '3'))
+                                send_timeout  = int(os.getenv('ZIP_SEND_TIMEOUT', '300'))
+                                sent = False
+                                for attempt in range(1, send_attempts + 1):
+                                    try:
+                                        fsfile  = FSInputFile(str(archive))
+                                        caption = (
+                                            f'🎬 <b>Архив готов!</b>\n\n'
+                                            f'📦 Размер: <code>{size_mb:.1f} MB</code>\n'
+                                            f'🗂 Файлов: <code>5 GIF</code> '
+                                            f'(<code>part1.gif</code>…<code>part5.gif</code>)\n\n'
+                                            f'<b>📋 Как загрузить в Steam:</b>\n'
+                                            f'Профиль → Редактировать профиль → Витрина\n'
+                                            f'→ Выбери слот → Загрузи каждый <code>partN.gif</code>'
+                                        )
+                                        await message.answer_document(
+                                            document=fsfile,
+                                            caption=caption,
+                                            parse_mode='HTML',
+                                            request_timeout=send_timeout,
+                                        )
+                                        logger.info(
+                                            'Sent ZIP %s to user %s (size=%.1f MB) on attempt %d',
+                                            archive, user_id, size_mb, attempt,
+                                        )
+                                        sent = True
+                                        break
+                                    except TelegramNetworkError as e:
+                                        logger.warning(
+                                            'Attempt %d: TelegramNetworkError sending %s: %s',
+                                            attempt, archive, e,
+                                        )
+                                        if attempt < send_attempts:
+                                            await asyncio.sleep(2 ** attempt)
+                                        else:
+                                            logger.exception(
+                                                'Failed to send ZIP %s after %d attempts',
+                                                archive, send_attempts,
+                                            )
+                                            try:
+                                                await message.answer(
+                                                    '⚠️ <b>Не удалось отправить архив</b>\n\n'
+                                                    'Превышено число попыток из-за сетевых ошибок. '
+                                                    'Архив сохранён на сервере.',
+                                                    parse_mode='HTML',
+                                                )
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        logger.exception('Failed to send ZIP %s', archive)
+                                        try:
+                                            await message.answer(
+                                                '⚠️ <b>Не удалось отправить архив</b>\n\n'
+                                                'Произошла ошибка при отправке. '
+                                                'Архив сохранён на сервере.',
+                                                parse_mode='HTML',
+                                            )
+                                        except Exception:
+                                            pass
+                                        break
+                                if not sent:
+                                    logger.warning('Archive %s was not delivered to user %s', archive, user_id)
+                        else:
+                            logger.warning('Archive path returned but file missing: %s', archive_path)
+                except Exception:
+                    logger.exception('Unexpected error while sending archive')
+                    try:
+                        await message.answer(
+                            '⚠️ <b>Ошибка при отправке архива</b>\n\nПроверьте логи сервера.',
+                            parse_mode='HTML',
+                        )
+                    except Exception:
+                        pass
+            else:
+                logger.debug('slice_video_inplace_with_gifs not available; skipping slicing')
+
+        except Exception as e:
+            logger.exception('Ошибка подготовки файла %s', src_path)
+            await _upd(0, failed_at=_STEP_SCALE, error_msg=str(e))
+            for path in (prepared_dir / src_path.name, src_path):
+                try:
+                    if path.exists():
+                        path.unlink()
+                        logger.info('Removed %s after preparation error', path)
+                except Exception:
+                    logger.exception('Failed to remove %s', path)
+            try:
+                await message.answer(
+                    f'❌ <b>Ошибка при масштабировании:</b>\n'
+                    f'<code>{_esc(str(e)[:300])}</code>',
+                    parse_mode='HTML',
+                )
+            except Exception:
+                pass
+
+    try:
+        if anim:
+            fname = anim.file_name or 'animation.mp4'
+            dest  = gifs_dir / f'{user_id}_{ts}_{fname}'
+            status_msg = await message.answer('⬇️ <b>Скачиваю файл…</b>', parse_mode='HTML')
+            await download_file(anim, dest)
+            _sz = dest.stat().st_size / (1024 * 1024) if dest.exists() else None
+            await _edit_status(status_msg, filename=fname, size_mb=_sz, step=0)
+            asyncio.create_task(_maybe_start_prepare_task(dest, fname, status_msg))
+            return
+
+        if vid:
+            fname = vid.file_name or 'video.mp4'
+            dest  = gifs_dir / f'{user_id}_{ts}_{fname}'
+            status_msg = await message.answer('⬇️ <b>Скачиваю файл…</b>', parse_mode='HTML')
+            await download_file(vid, dest)
+            _sz = dest.stat().st_size / (1024 * 1024) if dest.exists() else None
+            await _edit_status(status_msg, filename=fname, size_mb=_sz, step=0)
+            asyncio.create_task(_maybe_start_prepare_task(dest, fname, status_msg))
+            return
+
+        if doc:
+            fname = doc.file_name or 'file'
+            mime  = (doc.mime_type or '').lower()
+            if fname.lower().endswith(('.gif', '.mp4', '.webm')) or 'gif' in mime or mime.startswith('video'):
+                dest  = gifs_dir / f'{user_id}_{ts}_{fname}'
+                status_msg = await message.answer('⬇️ <b>Скачиваю файл…</b>', parse_mode='HTML')
+                await download_file(doc, dest)
+                _sz = dest.stat().st_size / (1024 * 1024) if dest.exists() else None
+                await _edit_status(status_msg, filename=fname, size_mb=_sz, step=0)
+                asyncio.create_task(_maybe_start_prepare_task(dest, fname, status_msg))
+                return
+            else:
+                await message.answer(
+                    f'⚠️ <b>Неподдерживаемый формат</b>\n\n'
+                    f'Файл: <code>{_esc(fname)}</code> (<code>{_esc(mime or "—")}</code>)\n\n'
+                    f'Отправь <b>GIF-анимацию</b> или <b>MP4-видео</b>.',
+                    parse_mode='HTML',
+                )
+                return
+
+        await message.answer(
+            '📎 <b>Файл не найден</b>\n\n'
+            'Пожалуйста, отправь GIF-анимацию или MP4-видео.',
+            parse_mode='HTML',
+        )
+
+    except Exception as e:
+        logger.exception('Ошибка при сохранении файла')
+        await message.answer(
+            f'❌ <b>Ошибка при скачивании файла:</b>\n'
+            f'<code>{_esc(str(e)[:300])}</code>',
+            parse_mode='HTML',
+        )
+
+
+# ─── Отладочные хендлеры ──────────────────────────────────────────────────────
 
 async def _debug_inspect(message: types.Message):
     parts = []
@@ -80,7 +629,7 @@ async def _debug_inspect(message: types.Message):
         parts.append('sticker')
     txt = ' | '.join(parts) or '<no media fields>'
     try:
-        await message.answer(f'DEBUG: {txt}')
+        await message.answer(f'<code>DEBUG: {_esc(txt)}</code>', parse_mode='HTML')
     except Exception:
         pass
     logger.debug('DEBUG message fields: %s', txt)
@@ -104,412 +653,49 @@ async def _debug_raw(message: types.Message):
             logger.debug('  document: %s %s', message.document.file_name, message.document.mime_type)
         if getattr(message, 'video', None):
             logger.debug('  video: %s %s', getattr(message.video, 'file_name', None), getattr(message.video, 'mime_type', None))
-        if message.photo:
-            logger.debug('  photo sizes: %s', [ (p.file_id, p.width, p.height) for p in message.photo ])
-    except Exception as e:
+    except Exception:
         logger.exception('DEBUG RAW ERROR')
 
 
-async def _always_reply(message: types.Message):
-    # Aggressive fallback for debugging: always reply so user sees bot is alive
-    try:
-        logger.debug('ALWAYS_REPLY: replying to message %s', getattr(message, 'message_id', None))
-        await message.answer('ACK — message received (debug handler).')
-    except Exception as e:
-        logger.exception('ALWAYS_REPLY error')
+# ─── Регистрация хендлеров ────────────────────────────────────────────────────
 
-
-def _save_to_gifs(src_path: Path, message: types.Message, gifs_dir: Path, orig_name: str | None = None) -> Path:
-    """
-    Copy the uploaded gif (src_path) into gifs_dir with a unique name and return the dest path.
-    """
-    try:
-        gifs_dir.mkdir(exist_ok=True)
-    except Exception:
-        pass
-    import datetime, shutil
-    user_id = getattr(message.from_user, 'id', 'unknown')
-    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    name = orig_name or src_path.name
-    # ensure filename has an extension
-    if not Path(name).suffix:
-        name = f'{name}.gif'
-    dest = gifs_dir / f'{user_id}_{ts}_{name}'
-    try:
-        shutil.copy2(src_path, dest)
-        logger.info('Saved uploaded GIF to %s', dest)
-        return dest
-    except Exception as e:
-        logger.exception('Ошибка при сохранении gif')
-        return dest
-
-
-async def cmd_start(message: types.Message):
-    logger.info('cmd_start: message_id=%s from=%s text=%s', 
-                getattr(message, 'message_id', None),
-                getattr(getattr(message, 'from_user', None), 'id', None),
-                (message.text or '')[:50])
-    text = (message.text or '').strip()
-    if not text or not text.lstrip().startswith('/'):
-        return
-    # accept '/start' with or without bot username and optional args
-    cmd = text.split()[0].lstrip('/')
-    if cmd.split('@')[0].lower() != 'start':
-        return
-
-    await message.answer('Привет! Пришли GIF, и я сохраню его локально.')
-
-
-async def handle_file(message: types.Message):
-    """Save GIF/video files locally. Works with aiogram 3.x API."""
-    import datetime
-    
-    gifs_dir = Path(__file__).parent / 'gifs'
-    gifs_dir.mkdir(exist_ok=True)
-    
-    user_id = getattr(message.from_user, 'id', 'unknown')
-    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    
-    # Get file info for logging
-    anim = getattr(message, 'animation', None)
-    doc = message.document
-    vid = getattr(message, 'video', None)
-    
-    anim_name = getattr(anim, 'file_name', None) if anim else None
-    doc_name = getattr(doc, 'file_name', None) if doc else None
-    doc_mime = getattr(doc, 'mime_type', None) if doc else None
-    video_name = getattr(vid, 'file_name', None) if vid else None
-    
-    logger.info('handle_file: msg_id=%s from=%s anim=%s doc=%s video=%s anim_name=%s doc_name=%s doc_mime=%s',
-                message.message_id, user_id,
-                bool(anim), bool(doc), bool(vid),
-                anim_name, doc_name, doc_mime)
-    
-    # Helper function to download file using aiogram 3.x API
-    async def download_file(file_obj, dest_path: Path):
-        """Download file using bot.download() - aiogram 3.x way"""
-        file_id = file_obj.file_id
-        logger.debug('Downloading file_id=%s to %s', file_id, dest_path)
-        await bot.download(file_id, destination=dest_path)
-        logger.info('Downloaded to %s (%d bytes)', dest_path, dest_path.stat().st_size)
-        return dest_path
-    
-    try:
-        # Priority: animation > video > document
-        # Telegram sends GIFs as animation with video/mp4 mime type
-
-        async def _maybe_start_prepare_task(src_path: Path, visible_name: str):
-            """Run prepare_and_resize_copy in executor and notify user on finish/error."""
-            if not FFMPEG_UTILS_AVAILABLE:
-                logger.debug('FFmpeg utils not available; skipping prepare task')
-                return
-            # check that ffmpeg executable is available
-            try:
-                if not is_ffmpeg_available():
-                    logger.warning('ffmpeg executable not found; skipping prepare task')
-                    # удаляем скачанный файл — обработка невозможна
-                    try:
-                        if src_path.exists():
-                            src_path.unlink()
-                            logger.info('Removed upload %s because ffmpeg is unavailable', src_path)
-                    except Exception:
-                        logger.exception('Failed to remove upload %s when ffmpeg missing', src_path)
-                    try:
-                        await message.answer('FFmpeg не найден; обработка пропущена и файл удалён. Установите ffmpeg и добавьте его в PATH или задайте переменную окружения FFMPEG_BIN.')
-                    except Exception:
-                        pass
-                    return
-            except Exception:
-                # defensive: if is_ffmpeg_available raises for some reason, skip and remove upload
-                logger.exception('Error checking ffmpeg availability')
-                try:
-                    if src_path.exists():
-                        src_path.unlink()
-                        logger.info('Removed upload %s due to ffmpeg check error', src_path)
-                except Exception:
-                    logger.exception('Failed to remove upload %s after ffmpeg check error', src_path)
-                return
-
-            if src_path.suffix.lower() != '.mp4':
-                logger.debug('Source not mp4, skipping prepare task: %s', src_path)
-                # удаляем скачанный неподходящий файл
-                try:
-                    if src_path.exists():
-                        src_path.unlink()
-                        logger.info('Removed non-mp4 upload %s', src_path)
-                except Exception:
-                    logger.exception('Failed to remove non-mp4 upload %s', src_path)
-                try:
-                    await message.answer('Файл неподдерживаемого формата был удалён. Отправьте GIF или видео в поддерживаемом формате.')
-                except Exception:
-                    pass
-                return
-            prepared_dir = Path(__file__).parent / 'prepared_gifs'
-            loop = asyncio.get_running_loop()
-            try:
-                # prepare_and_resize_copy may be None if ffmpeg helpers failed to import; assert to make intent explicit
-                assert prepare_and_resize_copy is not None
-                prepared = await loop.run_in_executor(None, prepare_and_resize_copy, src_path, prepared_dir)
-                try:
-                    await message.answer(f'Подготовлено: {visible_name}')
-                except Exception:
-                    pass
-
-                # Теперь копируем подготовленный файл в sliced_gifs и запускаем нарезку
-                try:
-                    slised_dir = Path(__file__).parent / 'sliced_gifs'
-                    slised_dir.mkdir(exist_ok=True)
-                    slised_copy = slised_dir / prepared.name
-                    shutil.copy2(prepared, slised_copy)
-                    logger.info('Copied prepared file to %s for slicing', slised_copy)
-
-                    if slice_video_inplace_with_gifs:
-                        # Run slicing in executor and handle errors locally
-                        try:
-                            archive_path = await loop.run_in_executor(None, slice_video_inplace_with_gifs, slised_copy)
-                        except Exception as e:
-                            logger.exception('Ошибка при нарезке файла %s', slised_copy)
-                            # Attempt to clean up any artifacts: slised_copy, partial gifs, prepared, original uploaded
-                            try:
-                                if slised_copy.exists():
-                                    slised_copy.unlink()
-                                    logger.info('Removed slised copy %s after failed slicing', slised_copy)
-                            except Exception:
-                                logger.exception('Failed to remove slised_copy %s', slised_copy)
-                            try:
-                                for f in slised_dir.glob(f"{slised_copy.stem}*"):
-                                    try:
-                                        if f.is_dir():
-                                            shutil.rmtree(f)
-                                        else:
-                                            f.unlink()
-                                        logger.info('Removed artifact %s', f)
-                                    except Exception:
-                                        logger.exception('Failed to remove artifact %s', f)
-                            except Exception:
-                                logger.exception('Error while cleaning artifacts in %s', slised_dir)
-                            try:
-                                if prepared.exists():
-                                    prepared.unlink()
-                                    logger.info('Removed prepared file %s after failed slicing', prepared)
-                            except Exception:
-                                logger.exception('Failed to remove prepared file %s', prepared)
-                            try:
-                                if src_path.exists():
-                                    src_path.unlink()
-                                    logger.info('Removed original upload %s after failed slicing', src_path)
-                            except Exception:
-                                logger.exception('Failed to remove original upload %s', src_path)
-                            try:
-                                await message.answer(f'Ошибка при создании GIFов: {e}')
-                            except Exception:
-                                pass
-                            return
-
-                        # Если нарезка прошла успешно — удаляем промежуточные файлы
-                        try:
-                            if src_path.exists():
-                                src_path.unlink()
-                                logger.info('Removed original upload %s', src_path)
-                        except Exception:
-                            logger.exception('Failed to remove original upload %s', src_path)
-                            try:
-                                await message.answer('Не удалось удалить исходный файл в gifs/ — проверьте права/логи.')
-                            except Exception:
-                                pass
-
-                        try:
-                            if prepared.exists():
-                                prepared.unlink()
-                                logger.info('Removed prepared file %s', prepared)
-                        except Exception:
-                            logger.exception('Failed to remove prepared file %s', prepared)
-                            try:
-                                await message.answer('Не удалось удалить временный файл в prepared_gifs/ — проверьте права/логи.')
-                            except Exception:
-                                pass
-
-                        # Удаляем все промежуточные .mp4 файлы в папке sliced_gifs, относящиеся к этому файлу
-                        try:
-                            removed = []
-                            for mp4 in slised_dir.glob(f"{slised_copy.stem}*.mp4"):
-                                try:
-                                    mp4.unlink()
-                                    removed.append(mp4.name)
-                                except Exception:
-                                    logger.exception('Failed to remove intermediate mp4 %s', mp4)
-                            if removed:
-                                logger.info('Removed intermediate mp4 files in %s: %s', slised_dir, ','.join(removed))
-                        except Exception:
-                            logger.exception('Error while cleaning .mp4 files in %s', slised_dir)
-
-                        # Если нарезка и архивирование прошли успешно — попытаемся отправить ZIP пользователю
-                        try:
-                            if archive_path:
-                                archive = Path(archive_path)
-                                if archive.exists():
-                                    try:
-                                        await message.answer('Нарезка завершена — формирую ZIP с GIFами и проверяю размер перед отправкой.')
-                                    except Exception:
-                                        pass
-                                    try:
-                                        size_mb = archive.stat().st_size / (1024 * 1024)
-                                        if size_mb > MAX_ARCHIVE_SEND_MB:
-                                            logger.warning('Archive %s is too large (%.1f MB) to send to user (limit %d MB)', archive, size_mb, MAX_ARCHIVE_SEND_MB)
-                                            try:
-                                                await message.answer(f'Архив GIF-ов слишком большой для отправки ({size_mb:.1f} MB). Он создан локально и доступен на сервере.')
-                                            except Exception:
-                                                pass
-                                        else:
-                                            # Create FSInputFile for each attempt to avoid reusing potentially consumed handles
-                                            # Inform user and attempt send with retries and increased timeout
-                                            try:
-                                                await message.answer('Начинаю отправку архива. Это может занять некоторое время...')
-                                            except Exception:
-                                                pass
-                                            send_attempts = int(os.getenv('ZIP_SEND_RETRIES', '3'))
-                                            send_timeout = int(os.getenv('ZIP_SEND_TIMEOUT', '600'))  # seconds (increased default to reduce timeouts)
-                                            sent = False
-                                            for attempt in range(1, send_attempts + 1):
-                                                try:
-                                                    fsfile = FSInputFile(str(archive))
-                                                    await message.answer_document(document=fsfile, caption=f'Архив GIF-ов: {archive.name}\nСодержит 5 частей для витрины Steam.', timeout=send_timeout)
-                                                    logger.info('Sent ZIP %s to user %s (size=%.1fMB) on attempt %d', archive, getattr(message.from_user, 'id', None), size_mb, attempt)
-                                                    sent = True
-                                                    break
-                                                except TelegramNetworkError as e:
-                                                    logger.warning('Attempt %d: TelegramNetworkError when sending %s: %s', attempt, archive, e)
-                                                    if attempt < send_attempts:
-                                                        await asyncio.sleep(2 ** attempt)
-                                                    else:
-                                                        logger.exception('Failed to send ZIP archive %s to user after %d attempts', archive, send_attempts)
-                                                        try:
-                                                            await message.answer('Не удалось отправить архив по сети после нескольких попыток. Архив создан локально.')
-                                                        except Exception:
-                                                            pass
-                                                except Exception:
-                                                    logger.exception('Failed to send ZIP archive %s to user', archive)
-                                                    try:
-                                                        await message.answer('Не удалось отправить архив по сети. Архив создан локально.')
-                                                    except Exception:
-                                                        pass
-                                                    break
-                                            if not sent:
-                                                logger.warning('Archive %s was not sent to user %s', archive, getattr(message.from_user, 'id', None))
-                                    except Exception:
-                                        logger.exception('Failed to process archive %s before sending', archive)
-                                else:
-                                    logger.warning('Archive path returned but file missing: %s', archive_path)
-                        except Exception:
-                            logger.exception('Unexpected error while attempting to send archive')
-                            try:
-                                await message.answer('Произошла ошибка при попытке отправить архив — проверьте логи.')
-                            except Exception:
-                                pass
-                    else:
-                        logger.debug('slice_video_inplace_with_gifs not available; skipping slicing')
-                except Exception as e:
-                    logger.exception('Ошибка при подготовке и нарезке файла %s', prepared)
-                    try:
-                        await message.answer(f'Ошибка при создании GIFов: {e}')
-                    except Exception:
-                        pass
-
-            except Exception as e:
-                logger.exception('Ошибка подготовки файла %s', src_path)
-                # Cleanup candidate prepared file and original upload
-                try:
-                    prep_candidate = prepared_dir / src_path.name
-                    if prep_candidate.exists():
-                        prep_candidate.unlink()
-                        logger.info('Removed prepared candidate %s after preparation error', prep_candidate)
-                except Exception:
-                    logger.exception('Failed to remove prepared candidate %s', prep_candidate)
-                try:
-                    if src_path.exists():
-                        src_path.unlink()
-                        logger.info('Removed original upload %s after preparation error', src_path)
-                except Exception:
-                    logger.exception('Failed to remove original upload %s', src_path)
-                try:
-                    await message.answer(f'Ошибка подготовки файла: {e}')
-                except Exception:
-                    pass
-
-        if anim:
-            fname = anim.file_name or 'animation.mp4'
-            # Always save with original extension (usually .mp4 for Telegram GIFs)
-            dest = gifs_dir / f'{user_id}_{ts}_{fname}'
-            await download_file(anim, dest)
-            await message.answer(f'GIF сохранён: {dest.name}')
-            # start background prepare task (non-blocking)
-            asyncio.create_task(_maybe_start_prepare_task(dest, dest.name))
-            return
-            
-        if vid:
-            fname = vid.file_name or 'video.mp4'
-            dest = gifs_dir / f'{user_id}_{ts}_{fname}'
-            await download_file(vid, dest)
-            await message.answer(f'Видео сохранено: {dest.name}')
-            asyncio.create_task(_maybe_start_prepare_task(dest, dest.name))
-            return
-            
-        if doc:
-            fname = doc.file_name or 'file'
-            mime = (doc.mime_type or '').lower()
-            
-            # Accept GIF or video files
-            if fname.lower().endswith(('.gif', '.mp4', '.webm')) or 'gif' in mime or mime.startswith('video'):
-                dest = gifs_dir / f'{user_id}_{ts}_{fname}'
-                await download_file(doc, dest)
-                await message.answer(f'Файл сохранён: {dest.name}')
-                asyncio.create_task(_maybe_start_prepare_task(dest, dest.name))
-                return
-            else:
-                await message.answer(f'Неподдерживаемый формат: {fname} ({mime}). Отправьте GIF или видео.')
-                return
-        
-        await message.answer('Отправьте GIF-анимацию или видео файл.')
-        
-    except Exception as e:
-        logger.exception('Ошибка при сохранении файла')
-        await message.answer(f'Ошибка при сохранении: {e}')
-
-
-# Register handlers (use explicit registration to be compatible with installed aiogram)
-# Register main handlers FIRST before debug handlers
 try:
-    # Start command handler
     dp.message.register(cmd_start, lambda message: (message.text or '').strip().startswith('/start'))
     logger.info('Registered cmd_start handler')
-    
-    # File handler - simple filter that checks for animation, document OR video
+
+    dp.message.register(cmd_help, lambda message: (message.text or '').strip().startswith('/help'))
+    logger.info('Registered cmd_help handler')
+
     def is_media_message(message):
         has_animation = bool(getattr(message, 'animation', None))
-        has_document = bool(message.document)
-        has_video = bool(getattr(message, 'video', None))
+        has_document  = bool(message.document)
+        has_video     = bool(getattr(message, 'video', None))
         result = has_animation or has_document or has_video
         if result:
             logger.debug('Media filter matched: animation=%s document=%s video=%s', has_animation, has_document, has_video)
         return result
-    
+
     dp.message.register(handle_file, is_media_message)
     logger.info('Registered handle_file handler')
+
+    dp.callback_query.register(handle_callback, lambda cb: cb.data in ('help', 'about_showcase'))
+    logger.info('Registered handle_callback handler')
+
 except Exception as e:
     logger.exception('Failed to register main handlers')
-    # fallback: some aiogram versions expect positional filter objects; attempt simple registrations
     try:
         dp.message.register(cmd_start)
+        dp.message.register(cmd_help)
         dp.message.register(handle_file)
         logger.info('Registered handlers using fallback method')
     except Exception:
         logger.error('Failed to register handlers even with fallback')
 
 if DEBUG_MODE:
-    # Debug: register inspector for media messages AFTER main handlers
     try:
         dp.message.register(_debug_inspect, lambda message: bool(
-            getattr(message, 'animation', None) or message.document or getattr(message, 'video', None) or message.photo or getattr(message, 'sticker', None)
+            getattr(message, 'animation', None) or message.document or
+            getattr(message, 'video', None) or message.photo or getattr(message, 'sticker', None)
         ))
         logger.info('Registered _debug_inspect handler')
     except Exception:
@@ -519,7 +705,6 @@ if DEBUG_MODE:
             pass
 
 if DEBUG_MODE:
-    # register raw inspector (catch-all) LAST to log message internals without blocking other handlers
     try:
         dp.message.register(_debug_raw, lambda message: True)
         logger.info('Registered _debug_raw handler')
@@ -530,76 +715,17 @@ if DEBUG_MODE:
             pass
 
 
-# Public startup/shutdown hooks — create/close aiohttp session when the event loop is available.
-# Exported so tests can call them directly.
-async def on_startup() -> None:
-    """Create aiohttp.ClientSession and attach to `bot` if not present."""
-    if not TOKEN:
-        logger.debug('on_startup: TELEGRAM_BOT_TOKEN not set; skipping session creation')
-        return
-    # If a session already exists, assume it's managed externally and do nothing
-    if getattr(bot, 'session', None) is not None:
-        logger.debug('on_startup: bot.session already present; skipping creation')
-        bot._created_session = False
-        return
-
-    try:
-        import aiohttp
-        timeout = aiohttp.ClientTimeout(total=_aiohttp_settings['timeout_seconds'])
-        connector = None
-        if _aiohttp_settings.get('connect_limit', 0) != 0:
-            connector = aiohttp.TCPConnector(limit=_aiohttp_settings['connect_limit'])
-        session = aiohttp.ClientSession(timeout=timeout, connector=connector) if connector is not None else aiohttp.ClientSession(timeout=timeout)
-        bot.session = session
-        bot._created_session = True
-        logger.debug('on_startup: created aiohttp ClientSession (connect_limit=%s)', _aiohttp_settings.get('connect_limit'))
-    except Exception:
-        logger.exception('on_startup: failed to create aiohttp ClientSession; continuing without custom session')
-        bot._created_session = False
-
-
-async def on_shutdown() -> None:
-    """Close session only if it was created by on_startup."""
-    sess = getattr(bot, 'session', None)
-    if not sess:
-        logger.debug('on_shutdown: no session to close')
-        return
-    if not getattr(bot, '_created_session', False):
-        logger.debug('on_shutdown: session not created by this module; leaving it intact')
-        return
-    try:
-        await sess.close()
-        logger.debug('on_shutdown: closed aiohttp session')
-    except Exception:
-        logger.exception('on_shutdown: error while closing session')
-    finally:
-        # Keep the attribute but mark it closed for callers
-        bot._created_session = False
-
+# ─── Точка входа ─────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    import logging
-
-    # Use existing logging configuration from early import
-
     if not TOKEN:
         raise RuntimeError('TELEGRAM_BOT_TOKEN not set')
 
     async def _main():
         try:
             logger.info('Starting polling...')
-            try:
-                # Pass startup/shutdown hooks to Dispatcher; aiogram will call them while loop is running
-                await dp.start_polling(bot, on_startup=on_startup, on_shutdown=on_shutdown)
-            except asyncio.CancelledError:
-                logger.info('Polling task cancelled, shutting down')
-            except KeyboardInterrupt:
-                logger.info('KeyboardInterrupt received, shutting down')
+            await dp.start_polling(bot)
         finally:
-            # Ensure shutdown hook runs if start_polling exited unexpectedly
-            try:
-                await on_shutdown()
-            except Exception:
-                logger.exception('Error while running on_shutdown()')
+            await bot.session.close()
 
     asyncio.run(_main())
