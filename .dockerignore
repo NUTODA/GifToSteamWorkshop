@@ -1,0 +1,35 @@
+# Виртуальное окружение
+venv/
+
+# Python-кэш
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Секреты (не должны попадать в образ)
+steam_showcase_bot/.env
+
+# Рабочие директории с файлами пользователей
+steam_showcase_bot/gifs/
+steam_showcase_bot/prepared_gifs/
+steam_showcase_bot/sliced_gifs/
+
+# Логи
+*.log
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Git
+.git/
+.gitignore
+
+# Тесты
+steam_showcase_bot/tests/

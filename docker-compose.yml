@@ -1,0 +1,17 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - steam_showcase_bot/.env
+    volumes:
+      - gifs:/app/steam_showcase_bot/gifs
+      - prepared_gifs:/app/steam_showcase_bot/prepared_gifs
+      - sliced_gifs:/app/steam_showcase_bot/sliced_gifs
+      - logs:/app/steam_showcase_bot/logs
+
+volumes:
+  gifs:
+  prepared_gifs:
+  sliced_gifs:
+  logs:

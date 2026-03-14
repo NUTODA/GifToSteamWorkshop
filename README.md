@@ -48,6 +48,9 @@ Bot отправляет ZIP пользователю (retry x3)
 GifToSteamWorkshop/
 ├── README.md                        ← этот файл
 ├── AGENTS.md                        ← инструкции для AI-агентов
+├── Dockerfile                       ← образ для Docker
+├── docker-compose.yml               ← оркестрация контейнера
+├── .dockerignore                    ← исключения из контекста сборки
 ├── steam_showcase_bot/              ← основной Python-пакет
 │   ├── __init__.py
 │   ├── bot.py                       ← точка входа, Telegram-хендлеры (aiogram 3.x)
@@ -132,6 +135,50 @@ python -m steam_showcase_bot.bot
 ```
 
 Бот запустится в режиме long polling. Остановка — `Ctrl+C`.
+
+---
+
+## Запуск через Docker
+
+### Требования
+
+- [Docker](https://docs.docker.com/get-docker/) и [Docker Compose](https://docs.docker.com/compose/) (v2+)
+- Файл `steam_showcase_bot/.env` с токеном бота (см. шаг 4 выше)
+
+### Сборка и запуск
+
+```bash
+docker compose up -d --build
+```
+
+Контейнер соберётся (~2–3 мин при первом запуске: установка ffmpeg + зависимостей), после чего бот запустится в фоновом режиме.
+
+### Управление
+
+```bash
+# Посмотреть логи в реальном времени
+docker compose logs -f bot
+
+# Остановить бота
+docker compose down
+
+# Пересобрать образ (после изменений в коде)
+docker compose up -d --build
+
+# Посмотреть статус контейнера
+docker compose ps
+```
+
+### Что хранится в Docker volumes
+
+| Volume | Путь в контейнере | Содержимое |
+|---|---|---|
+| `gifs` | `/app/steam_showcase_bot/gifs` | Скачанные оригиналы |
+| `prepared_gifs` | `/app/steam_showcase_bot/prepared_gifs` | Ресайзнутые MP4 |
+| `sliced_gifs` | `/app/steam_showcase_bot/sliced_gifs` | Нарезанные части и ZIP |
+| `logs` | `/app/steam_showcase_bot/logs` | Лог-файлы |
+
+Данные в volumes **не удаляются** при пересборке образа. Для полной очистки: `docker compose down -v`.
 
 ---
 
