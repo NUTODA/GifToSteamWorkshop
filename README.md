@@ -221,6 +221,7 @@ docker compose ps
 | `MAX_CONCURRENT_TASKS` | `3` | Максимум параллельных задач ffmpeg |
 | `FSM_STORAGE` | `memory` | Хранилище FSM: `memory` (локально) или `redis` (production) |
 | `REDIS_URL` | — | URL Redis для FSM (например `redis://redis:6379/0`) |
+| `DEFAULT_LOCALE` | `ru` | Язык интерфейса по умолчанию: `ru`, `en`, `uk` |
 | `ZIP_SEND_RETRIES` | `3` | Количество попыток отправки ZIP при сетевой ошибке |
 | `ZIP_SEND_TIMEOUT` | `300` | Таймаут одной попытки отправки ZIP (сек) |
 | `SHUTDOWN_TASK_WAIT_TIMEOUT` | `30` | Сколько ждать активные задачи при shutdown перед принудительной отменой (сек) |
@@ -229,6 +230,15 @@ docker compose ps
 | `HEARTBEAT_INTERVAL_SECONDS` | `5` | Интервал обновления heartbeat-файла (сек) |
 | `HEALTHCHECK_MAX_STALENESS_SECONDS` | `20` | Максимально допустимый «возраст» heartbeat для статуса healthy (сек) |
 | `BOT_DEBUG` | `0` | Включить отладочные хендлеры (`1` / `0`) |
+
+---
+
+## Мультиязычность
+
+- Поддерживаемые языки интерфейса: `ru`, `en`, `uk`
+- По умолчанию бот берёт язык из Telegram-профиля пользователя
+- Изменить язык можно командой `/lang` (или `/language`) и кнопкой `🌐 Язык` в `/start`
+- Выбор языка хранится в FSM-данных пользователя; для сохранения после перезапуска используйте `FSM_STORAGE=redis`
 
 ---
 

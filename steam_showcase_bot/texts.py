@@ -1,9 +1,11 @@
 import html as _html_module
-import os
 
 from aiogram import types
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from .config import MAX_ARCHIVE_SEND_MB
+from .i18n import locale_display_name, normalize_locale, tr
 
 STEP_SCALE = 1
 STEP_SLICE = 2
@@ -17,68 +19,38 @@ def esc(text: str) -> str:
     return _html_module.escape(str(text))
 
 
-def welcome_markup() -> InlineKeyboardMarkup:
+def welcome_markup(locale: str) -> InlineKeyboardMarkup:
+    ui_locale = normalize_locale(locale)
     builder = InlineKeyboardBuilder()
-    builder.button(text='📖 Справка', callback_data='help')
-    builder.button(text='🎮 Что такое Витрина?', callback_data='about_showcase')
-    builder.adjust(2)
+    builder.button(text=tr('button_help', ui_locale), callback_data='help')
+    builder.button(text=tr('button_about_showcase', ui_locale), callback_data='about_showcase')
+    builder.button(text=tr('button_language', ui_locale), callback_data='choose_language')
+    builder.adjust(2, 1)
     return builder.as_markup()
 
 
-def welcome_text(first_name: str) -> str:
-    return (
-        f'🎬 <b>Steam Showcase Bot</b>\n\n'
-        f'Привет, {esc(first_name)}! 👋\n\n'
-        f'Я автоматически подготовлю твою анимацию для <b>Витрины Steam</b>.\n\n'
-        f'<b>📌 Как это работает:</b>\n'
-        f'Витрина отображает GIF через 5 горизонтальных слотов по <code>150 px</code>. Я:\n\n'
-        f'1️⃣  Масштабирую видео до <code>750 px</code>\n'
-        f'2️⃣  Нарезаю на <b>5 частей</b> по <code>150 px</code>\n'
-        f'3️⃣  Конвертирую каждую часть в <code>.gif</code>\n'
-        f'4️⃣  Упаковываю всё в <b>ZIP-архив</b>\n\n'
-        f'🚀 <b>Просто отправь GIF или MP4-видео — остальное сделаю я!</b>'
-    )
+def language_markup(locale: str) -> InlineKeyboardMarkup:
+    ui_locale = normalize_locale(locale)
+    builder = InlineKeyboardBuilder()
+    for lang in ('ru', 'en', 'uk'):
+        title = locale_display_name(lang, ui_locale)
+        if lang == ui_locale:
+            title = f'✅ {title}'
+        builder.button(text=title, callback_data=f'set_lang:{lang}')
+    builder.adjust(3)
+    return builder.as_markup()
 
 
-def help_text() -> str:
-    limit_mb = os.getenv('MAX_ARCHIVE_SEND_MB', '50')
-    return (
-        f'❓ <b>Справка — Steam Showcase Bot</b>\n\n'
-        f'<b>Поддерживаемые форматы:</b>\n'
-        f'• GIF-анимация (Telegram конвертирует её в MP4 автоматически)\n'
-        f'• MP4-видео\n'
-        f'• Файлы <code>.gif</code>, <code>.mp4</code>, <code>.webm</code> как документ\n\n'
-        f'<b>Как использовать:</b>\n'
-        f'1. Отправь GIF или видео прямо в этот чат\n'
-        f'2. Дождись обработки (обычно 10–60 сек)\n'
-        f'3. Получи ZIP с 5 готовыми GIF-файлами\n'
-        f'4. Загрузи <code>part1.gif</code>…<code>part5.gif</code>\n'
-        f'   в слоты Витрины на странице своего профиля Steam\n\n'
-        f'<b>Команды:</b>\n'
-        f'/start — главное меню\n'
-        f'/help — эта справка\n\n'
-        f'<b>⚠️ Частые вопросы:</b>\n'
-        f'• <i>«Неподдерживаемый формат»</i> — отправь файл как GIF-анимацию, '
-        f'а не как документ\n'
-        f'• <i>«Архив слишком большой»</i> — файл создан на сервере, но превысил '
-        f'лимит отправки {esc(limit_mb)} MB\n'
-        f'• <i>«FFmpeg не найден»</i> — обратитесь к администратору сервера'
-    )
+def welcome_text(first_name: str, locale: str) -> str:
+    return tr('welcome_text', locale, first_name=esc(first_name))
 
 
-def about_showcase_text() -> str:
-    return (
-        '🎮 <b>Витрина Steam (Steam Showcase)</b>\n\n'
-        'Витрина — раздел профиля Steam, где можно разместить анимированные GIF-картинки. '
-        'Она состоит из <b>5 горизонтальных слотов</b>, каждый шириной <code>150 px</code>.\n\n'
-        'Чтобы анимация выглядела как единое целое, нужно:\n'
-        '1. Взять видео шириной <code>750 px</code> (5 × 150 px)\n'
-        '2. Разрезать на 5 равных частей\n'
-        '3. Загрузить каждую часть в соответствующий слот\n\n'
-        '<b>Именно это я делаю автоматически!</b> 🎉\n\n'
-        'Управление Витриной:\n'
-        '<code>steamcommunity.com → Профиль → Редактировать → Витрина</code>'
-    )
+def help_text(locale: str) -> str:
+    return tr('help_text', locale, limit_mb=esc(MAX_ARCHIVE_SEND_MB))
+
+
+def about_showcase_text(locale: str) -> str:
+    return tr('about_showcase_text', locale)
 
 
 def status_text(
@@ -87,15 +59,16 @@ def status_text(
     step: int = 0,
     failed_at: int | None = None,
     error_msg: str | None = None,
+    locale: str = 'ru',
 ) -> str:
     """Формирует HTML-текст прогресс-статуса обработки файла."""
     size_str = f' <i>({size_mb:.1f} MB)</i>' if size_mb is not None else ''
 
     step_defs = [
-        (STEP_SCALE, 'Масштабирование до <code>750 px</code>'),
-        (STEP_SLICE, 'Нарезка на 5 частей'),
-        (STEP_GIFS,  'Создание GIF-файлов'),
-        (STEP_ZIP,   'Архивирование в ZIP'),
+        (STEP_SCALE, tr('status_step_scale', locale)),
+        (STEP_SLICE, tr('status_step_slice', locale)),
+        (STEP_GIFS, tr('status_step_gifs', locale)),
+        (STEP_ZIP, tr('status_step_zip', locale)),
     ]
 
     rows = []
@@ -113,18 +86,21 @@ def status_text(
 
     if failed_at is not None:
         err_detail = f'\n<i>{esc(str(error_msg)[:200])}</i>' if error_msg else ''
-        header = f'❌ <b>Ошибка при обработке</b>{err_detail}'
+        header = tr('status_header_failed', locale, err_detail=err_detail)
     elif step >= STEP_DONE:
-        header = '✅ <b>Готово! Отправляю архив…</b>'
+        header = tr('status_header_done', locale)
     elif step == 0:
-        header = '⏳ <b>Начинаю обработку…</b>'
+        header = tr('status_header_start', locale)
     else:
-        header = '⏳ <b>Идёт обработка…</b>'
+        header = tr('status_header_progress', locale)
 
-    return (
-        f'📥 <b>Файл получен:</b> <code>{esc(filename)}</code>{size_str}\n\n'
-        f'{header}\n\n'
-        f'{steps_block}'
+    return tr(
+        'status_file_received',
+        locale,
+        filename=esc(filename),
+        size_str=size_str,
+        header=header,
+        steps_block=steps_block,
     )
 
 

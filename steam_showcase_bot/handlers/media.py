@@ -6,6 +6,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher, Router, types
 
 from ..config import MAX_FILE_SIZE_MB
+from ..i18n import get_user_locale, tr
 from ..services.processor import ProcessingService
 from ..texts import edit_status, esc
 
@@ -44,7 +45,15 @@ async def handle_file(message: types.Message, bot: Bot, processor: ProcessingSer
     gifs_dir = Path(__file__).resolve().parent.parent / 'gifs'
     gifs_dir.mkdir(exist_ok=True)
 
-    user_id = getattr(message.from_user, 'id', 'unknown')
+    user = getattr(message, 'from_user', None)
+    user_id = getattr(user, 'id', None)
+    locale = await get_user_locale(
+        dispatcher,
+        bot,
+        user_id,
+        getattr(user, 'language_code', None),
+    )
+    owner_id = user_id if user_id is not None else 'unknown'
     ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 
     anim = getattr(message, 'animation', None)
@@ -59,8 +68,7 @@ async def handle_file(message: types.Message, bot: Bot, processor: ProcessingSer
     async def _download_and_process(file_obj, fname: str):
         if dispatcher.workflow_data.get('is_stopping'):
             await message.answer(
-                '⏳ <b>Бот завершает работу</b>\n\n'
-                'Сейчас новые файлы не принимаются. Повтори отправку через минуту.',
+                tr('media_stopping', locale),
                 parse_mode='HTML',
             )
             return
@@ -68,22 +76,24 @@ async def handle_file(message: types.Message, bot: Bot, processor: ProcessingSer
         ok, size_mb = _check_file_size(file_obj)
         if not ok:
             await message.answer(
-                f'⚠️ <b>Файл слишком большой</b>\n\n'
-                f'Размер: <code>{size_mb:.1f} MB</code> '
-                f'(максимум: <code>{MAX_FILE_SIZE_MB} MB</code>)\n\n'
-                f'Попробуй отправить файл поменьше.',
+                tr(
+                    'media_file_too_big',
+                    locale,
+                    size_mb=f'{size_mb:.1f}',
+                    max_mb=MAX_FILE_SIZE_MB,
+                ),
                 parse_mode='HTML',
             )
             return
 
-        dest = gifs_dir / f'{user_id}_{ts}_{fname}'
-        status_msg = await message.answer('⬇️ <b>Скачиваю файл…</b>', parse_mode='HTML')
+        dest = gifs_dir / f'{owner_id}_{ts}_{fname}'
+        status_msg = await message.answer(tr('media_downloading', locale), parse_mode='HTML')
         await bot.download(file_obj.file_id, destination=dest)
         logger.info('Downloaded to %s (%d bytes)', dest, dest.stat().st_size)
 
         _sz = dest.stat().st_size / (1024 * 1024) if dest.exists() else None
-        await edit_status(status_msg, filename=fname, size_mb=_sz, step=0)
-        task = asyncio.create_task(processor.process_file(dest, fname, message, status_msg))
+        await edit_status(status_msg, filename=fname, size_mb=_sz, step=0, locale=locale)
+        task = asyncio.create_task(processor.process_file(dest, fname, message, status_msg, locale))
         active_tasks = dispatcher.workflow_data.get('active_processing_tasks')
         if isinstance(active_tasks, set):
             active_tasks.add(task)
@@ -108,23 +118,24 @@ async def handle_file(message: types.Message, bot: Bot, processor: ProcessingSer
                 return
             else:
                 await message.answer(
-                    f'⚠️ <b>Неподдерживаемый формат</b>\n\n'
-                    f'Файл: <code>{esc(fname)}</code> (<code>{esc(mime or "—")}</code>)\n\n'
-                    f'Отправь <b>GIF-анимацию</b> или <b>MP4-видео</b>.',
+                    tr(
+                        'media_unsupported_format',
+                        locale,
+                        filename=esc(fname),
+                        mime=esc(mime or '-'),
+                    ),
                     parse_mode='HTML',
                 )
                 return
 
         await message.answer(
-            '📎 <b>Файл не найден</b>\n\n'
-            'Пожалуйста, отправь GIF-анимацию или MP4-видео.',
+            tr('media_file_not_found', locale),
             parse_mode='HTML',
         )
 
     except Exception as e:
         logger.exception('Error while saving file')
         await message.answer(
-            f'❌ <b>Ошибка при скачивании файла:</b>\n'
-            f'<code>{esc(str(e)[:300])}</code>',
+            tr('media_download_error', locale, error=esc(str(e)[:300])),
             parse_mode='HTML',
         )

@@ -13,6 +13,7 @@ from ..ffmpeg_utils import (
     prepare_and_resize_copy,
     slice_video_inplace_with_gifs,
 )
+from ..i18n import tr
 from ..texts import (
     STEP_DONE,
     STEP_GIFS,
@@ -36,13 +37,14 @@ class ProcessingService:
         visible_name: str,
         message: Message,
         status_msg: Message | None,
+        locale: str,
     ) -> None:
         """Полный цикл: resize -> slice -> GIF -> ZIP -> отправка -> cleanup.
 
         Автоматически захватывает семафор, ограничивая параллельные задачи ffmpeg.
         """
         async with self._semaphore:
-            await self._do_process(src_path, visible_name, message, status_msg)
+            await self._do_process(src_path, visible_name, message, status_msg, locale)
 
     async def _do_process(
         self,
@@ -50,6 +52,7 @@ class ProcessingService:
         visible_name: str,
         message: Message,
         status_msg: Message | None,
+        locale: str,
     ) -> None:
         user_id = getattr(message.from_user, 'id', 'unknown')
         _sz: float | None = None
@@ -61,7 +64,7 @@ class ProcessingService:
         async def _upd(step: int, failed_at: int | None = None, error_msg: str | None = None):
             await edit_status(
                 status_msg, filename=visible_name, size_mb=_sz,
-                step=step, failed_at=failed_at, error_msg=error_msg,
+                step=step, failed_at=failed_at, error_msg=error_msg, locale=locale,
             )
 
         if not is_ffmpeg_available():
@@ -70,10 +73,7 @@ class ProcessingService:
             self._safe_unlink(src_path)
             try:
                 await message.answer(
-                    '⚠️ <b>FFmpeg не найден</b>\n\n'
-                    'Обработка невозможна. Попросите администратора установить '
-                    '<code>ffmpeg</code> и добавить его в PATH или задать '
-                    'переменную окружения <code>FFMPEG_BIN</code>.',
+                    tr('processor_ffmpeg_missing', locale),
                     parse_mode='HTML',
                 )
             except Exception:
@@ -86,11 +86,11 @@ class ProcessingService:
             self._safe_unlink(src_path)
             try:
                 await message.answer(
-                    '⚠️ <b>Неподдерживаемый формат</b>\n\n'
-                    f'Получен файл <code>{esc(visible_name)}</code>.\n\n'
-                    'Бот принимает только <b>MP4-файлы</b>. Telegram автоматически '
-                    'конвертирует GIF-анимации в MP4 — попробуй отправить файл '
-                    'как GIF-анимацию, а не как документ.',
+                    tr(
+                        'processor_unsupported_format',
+                        locale,
+                        filename=esc(visible_name),
+                    ),
                     parse_mode='HTML',
                 )
             except Exception:
@@ -121,8 +121,7 @@ class ProcessingService:
                 self._clean_artifacts(sliced_dir, sliced_copy.stem)
                 try:
                     await message.answer(
-                        f'❌ <b>Ошибка при создании GIF:</b>\n'
-                        f'<code>{esc(str(e)[:300])}</code>',
+                        tr('processor_gif_error', locale, error=esc(str(e)[:300])),
                         parse_mode='HTML',
                     )
                 except Exception:
@@ -135,7 +134,7 @@ class ProcessingService:
             self._clean_mp4_artifacts(sliced_dir, sliced_copy.stem)
 
             await _upd(STEP_DONE)
-            await self._send_archive(archive_path, message, user_id)
+            await self._send_archive(archive_path, message, user_id, locale)
 
         except Exception as e:
             logger.exception('Error while preparing file %s', src_path)
@@ -144,14 +143,13 @@ class ProcessingService:
                 self._safe_unlink(path)
             try:
                 await message.answer(
-                    f'❌ <b>Ошибка при масштабировании:</b>\n'
-                    f'<code>{esc(str(e)[:300])}</code>',
+                    tr('processor_scale_error', locale, error=esc(str(e)[:300])),
                     parse_mode='HTML',
                 )
             except Exception:
                 pass
 
-    async def _send_archive(self, archive_path, message: Message, user_id) -> None:
+    async def _send_archive(self, archive_path, message: Message, user_id, locale: str) -> None:
         if not archive_path:
             logger.debug('No archive path returned; skipping send')
             return
@@ -166,10 +164,12 @@ class ProcessingService:
             logger.warning('Archive %s is too large (%.1f MB), limit %d MB', archive, size_mb, MAX_ARCHIVE_SEND_MB)
             try:
                 await message.answer(
-                    f'📦 <b>Архив готов, но слишком большой для отправки</b>\n\n'
-                    f'Размер: <code>{size_mb:.1f} MB</code> '
-                    f'(лимит: <code>{MAX_ARCHIVE_SEND_MB} MB</code>)\n\n'
-                    f'Архив сохранён на сервере и доступен администратору.',
+                    tr(
+                        'processor_archive_too_big',
+                        locale,
+                        size_mb=f'{size_mb:.1f}',
+                        max_mb=MAX_ARCHIVE_SEND_MB,
+                    ),
                     parse_mode='HTML',
                 )
             except Exception:
@@ -180,15 +180,7 @@ class ProcessingService:
         for attempt in range(1, ZIP_SEND_RETRIES + 1):
             try:
                 fsfile = FSInputFile(str(archive))
-                caption = (
-                    f'🎬 <b>Архив готов!</b>\n\n'
-                    f'📦 Размер: <code>{size_mb:.1f} MB</code>\n'
-                    f'🗂 Файлов: <code>5 GIF</code> '
-                    f'(<code>part1.gif</code>…<code>part5.gif</code>)\n\n'
-                    f'<b>📋 Как загрузить в Steam:</b>\n'
-                    f'Профиль → Редактировать профиль → Витрина\n'
-                    f'→ Выбери слот → Загрузи каждый <code>partN.gif</code>'
-                )
+                caption = tr('processor_archive_caption', locale, size_mb=f'{size_mb:.1f}')
                 await message.answer_document(
                     document=fsfile,
                     caption=caption,
@@ -209,9 +201,7 @@ class ProcessingService:
                     logger.exception('Failed to send ZIP %s after %d attempts', archive, ZIP_SEND_RETRIES)
                     try:
                         await message.answer(
-                            '⚠️ <b>Не удалось отправить архив</b>\n\n'
-                            'Превышено число попыток из-за сетевых ошибок. '
-                            'Архив сохранён на сервере.',
+                            tr('processor_send_failed_network', locale),
                             parse_mode='HTML',
                         )
                     except Exception:
@@ -220,9 +210,7 @@ class ProcessingService:
                 logger.exception('Failed to send ZIP %s', archive)
                 try:
                     await message.answer(
-                        '⚠️ <b>Не удалось отправить архив</b>\n\n'
-                        'Произошла ошибка при отправке. '
-                        'Архив сохранён на сервере.',
+                        tr('processor_send_failed_generic', locale),
                         parse_mode='HTML',
                     )
                 except Exception:

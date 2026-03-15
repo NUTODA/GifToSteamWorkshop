@@ -5,6 +5,8 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
 from aiogram.types import Message
 
+from ..i18n import get_user_locale, resolve_locale, tr
+
 logger = logging.getLogger('steam_showcase_bot.throttling')
 
 
@@ -28,9 +30,18 @@ class ThrottlingMiddleware(BaseMiddleware):
             if now - last < self._rate_limit:
                 remaining = int(self._rate_limit - (now - last)) + 1
                 logger.debug('Throttled user %s: %d sec remaining', user.id, remaining)
+                locale = resolve_locale(None, getattr(user, 'language_code', None))
+                dispatcher = data.get('dispatcher')
+                bot = data.get('bot')
+                if dispatcher is not None and bot is not None:
+                    locale = await get_user_locale(
+                        dispatcher,
+                        bot,
+                        getattr(user, 'id', None),
+                        getattr(user, 'language_code', None),
+                    )
                 await event.answer(
-                    f'⏳ <b>Подожди немного</b>\n\n'
-                    f'Следующий файл можно отправить через <code>{remaining}</code> сек.',
+                    tr('throttling_wait', locale, remaining=remaining),
                     parse_mode='HTML',
                 )
                 return None

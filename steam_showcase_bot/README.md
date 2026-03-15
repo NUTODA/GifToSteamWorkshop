@@ -34,6 +34,12 @@ cp steam_showcase_bot/.env.example steam_showcase_bot/.env
 python -m steam_showcase_bot.bot
 ```
 
+## Мультиязычность
+
+- Поддерживаются языки интерфейса: `ru`, `en`, `uk`
+- Пользователь может сменить язык командой `/lang` (или `/language`)
+- Значение по умолчанию задаётся через `DEFAULT_LOCALE` в `.env`
+
 ## Требования к ffmpeg
 
 ffmpeg и ffprobe должны быть установлены в системе:

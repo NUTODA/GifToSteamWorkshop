@@ -24,6 +24,9 @@ MAX_CONCURRENT_TASKS = int(os.getenv('MAX_CONCURRENT_TASKS', '3'))
 MAX_FILE_SIZE_MB = int(os.getenv('MAX_FILE_SIZE_MB', '20'))
 FSM_STORAGE = os.getenv('FSM_STORAGE', 'memory').strip().lower()
 REDIS_URL = os.getenv('REDIS_URL', '').strip()
+_SUPPORTED_LOCALES = {'ru', 'en', 'uk'}
+_default_locale_raw = os.getenv('DEFAULT_LOCALE', 'ru').strip().lower()
+DEFAULT_LOCALE = _default_locale_raw if _default_locale_raw in _SUPPORTED_LOCALES else 'ru'
 
 SHUTDOWN_TASK_WAIT_TIMEOUT = int(os.getenv('SHUTDOWN_TASK_WAIT_TIMEOUT', '30'))
 FFMPEG_TERMINATE_TIMEOUT = int(os.getenv('FFMPEG_TERMINATE_TIMEOUT', '5'))
